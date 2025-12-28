@@ -12,6 +12,18 @@
 .env.*.local
 *.env
 
+# =============================================================================
+# Cursor IDE & Development State
+# =============================================================================
+
+# Cursor IDE files
+.cursor/
+.cursorignore
+.cursorrules
+
+# Memory bank (RIPER workflow state)
+memory-bank/
+
 # Database files
 *.db
 *.sqlite
