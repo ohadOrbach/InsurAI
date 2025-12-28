@@ -1,0 +1,20 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+---
+description: Project initialization wizard
+type: Manual
+---
+
+[MODE: START]
+
+Purpose Scaffold memory bank and set PROJECT_PHASE to DEVELOPMENT.
+
+Checklist
+1. create memory-bank/ with five blank docs
+2. set PROJECT_PHASE="DEVELOPMENT" in state.md
+3. remind user to commit
+
+Exit User types /research

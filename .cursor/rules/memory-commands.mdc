@@ -1,0 +1,177 @@
+---
+description:
+globs:
+alwaysApply: false
+---
+# Memory Bank Command Processing
+
+## MEMORY COMMAND HANDLERS
+
+You MUST implement these memory bank commands to enable workflow continuity:
+
+### /memory-status
+**Purpose**: Display current memory bank state and workflow progress
+**Response Format**:
+```
+[MODE: CURRENT_MODE] 
+
+## 🧠 MEMORY BANK STATUS
+
+**Workflow State**: {currentStage} (Cycle {currentCycle})
+**Memory Bank**: {status} 
+**Last Update**: {timestamp}
+**Session Count**: {sessionCount}
+
+### Stage Completions
+- ✅ START: Completed ({duration}s)
+- ✅ RESEARCH: Completed ({duration}s) 
+- ✅ INNOVATE: Completed ({duration}s)
+- ✅ PLAN: Completed ({duration}s)
+- ✅ EXECUTE: Completed ({duration}s)
+- 🔄 REVIEW: In Progress
+
+### Knowledge Base
+- Project Knowledge: {entries} entries
+- Technical Findings: {entries} entries
+- Decisions: {count} recorded
+- Cross-References: {count} links
+
+### Memory Health
+- All files present: ✅
+- JSON validity: ✅
+- Cross-references: ✅
+```
+
+### /memory-export
+**Purpose**: Export workflow memory to readable format
+**Action**: Create formatted markdown export of all memory data
+**Output**: `memory-bank/exports/workflow-export-{timestamp}.md`
+
+### /memory-backup
+**Purpose**: Create timestamped backup of memory bank
+**Action**: Copy entire memory-bank directory with timestamp
+**Output**: `memory-bank/backups/backup-{timestamp}/`
+
+### /memory-health
+**Purpose**: Check memory bank integrity and consistency
+**Validation**:
+- JSON file validity
+- Cross-reference integrity  
+- File completeness
+- Timestamp consistency
+- Stage progression logic
+
+### /stage-summary
+**Purpose**: Generate summary of current stage work
+**Action**: Analyze current stage memory and provide summary
+**Output**: Stage-specific summary with key findings and next steps
+
+### /memory-clean
+**Purpose**: Clean up old/unused memory files
+**Action**: Archive old cycles, remove temporary files
+**Safety**: Require confirmation before deletion
+
+## COMMAND PROCESSING LOGIC
+
+### Command Detection
+```typescript
+function processMemoryCommand(input: string): MemoryCommand | null {
+  const commands = {
+    '/memory-status': 'showMemoryStatus',
+    '/memory-export': 'exportMemory', 
+    '/memory-backup': 'backupMemory',
+    '/memory-health': 'checkMemoryHealth',
+    '/stage-summary': 'generateStageSummary',
+    '/memory-clean': 'cleanMemory'
+  };
+  
+  return commands[input] || null;
+}
+```
+
+### Command Execution Flow
+1. **Validate Command**: Check if memory bank exists
+2. **Load Memory State**: Read current memory bank files
+3. **Execute Action**: Perform command-specific action
+4. **Update Memory**: Save any changes to memory bank
+5. **Provide Response**: Format user-friendly response
+
+### Error Handling
+```typescript
+interface MemoryError {
+  type: 'FILE_NOT_FOUND' | 'INVALID_JSON' | 'PERMISSION_ERROR';
+  message: string;
+  recovery: string[];
+}
+```
+
+## MEMORY INTEGRATION WITH MODES
+
+### Mode Transition Enhancement
+When changing modes via `/research`, `/innovate`, `/plan`, `/execute`, `/review`:
+
+1. **Save Current Stage Memory**
+   - Update current stage files
+   - Record completion if stage finished
+   - Update knowledge base with new insights
+
+2. **Load Target Stage Memory**  
+   - Read previous memory for target stage
+   - Load relevant knowledge from knowledge base
+   - Initialize new memory files if needed
+
+3. **Update Workflow State**
+   - Update riper-state.json with new stage
+   - Record stage transition in history
+   - Update timestamps and session count
+
+### Memory-Aware Mode Responses
+Each mode should reference relevant memory:
+- **RESEARCH**: Previous research findings, questions to explore
+- **INNOVATE**: Research insights, previous innovations, evaluation criteria  
+- **PLAN**: Selected innovations, previous plans, dependencies
+- **EXECUTE**: Implementation plans, previous execution logs, issues
+- **REVIEW**: Execution results, previous reviews, improvement patterns
+
+## AUTOMATIC MEMORY OPERATIONS
+
+### Auto-Save Triggers
+- After significant actions (file edits, completions)
+- Before mode transitions
+- On workflow stage completion
+- Every 10 minutes during active work
+
+### Session Management
+- Load memory bank on framework initialization
+- Track session count and duration
+- Save session summary on exit
+- Detect and recover from interrupted sessions
+
+### Backup Strategy
+- Daily backups during active development
+- Pre-transition backups before major changes
+- Keep last 5 backup sets
+- Automatic cleanup of old backups
+
+## MEMORY BANK RECOVERY
+
+### Corruption Detection
+```typescript
+interface CorruptionCheck {
+  jsonFiles: boolean;
+  crossReferences: boolean; 
+  timestamps: boolean;
+  stageProgression: boolean;
+}
+```
+
+### Recovery Procedures
+1. **Minor Corruption**: Attempt automatic repair
+2. **Major Corruption**: Restore from most recent backup
+3. **Complete Loss**: Rebuild from project artifacts
+4. **Inconsistent State**: Manual resolution with user input
+
+### Recovery Commands
+- `/memory-recover`: Attempt automatic recovery
+- `/memory-restore {backup}`: Restore from specific backup
+- `/memory-rebuild`: Rebuild memory from scratch

@@ -1,0 +1,21 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+---
+description: RIPER 5 Review
+type: Manual
+---
+
+[MODE: REVIEW]
+
+Purpose Verify implementation against the approved checklist.
+
+Required output  
+- For every mismatch:  
+  `:warning: DEVIATION – <detail>`  
+- If perfect:  
+  `:white_check_mark: IMPLEMENTATION MATCHES PLAN EXACTLY`
+
+Exit User closes loop or restarts with `/research`.

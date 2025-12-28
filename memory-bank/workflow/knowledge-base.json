@@ -1,0 +1,75 @@
+{
+  "projectKnowledge": {
+    "architecture": {
+      "description": "RAG-based conversational AI for insurance policy analysis",
+      "pattern": "Layered architecture with Services, Repositories, and API layers",
+      "keyComponents": [
+        "PDF Ingestion Pipeline (OCR + Text Classification)",
+        "Coverage Guardrail Logic (Exclusions → Inclusions → Conditionals)",
+        "Vector Store for Semantic Search",
+        "Multi-LLM Chat Service",
+        "JWT Authentication"
+      ]
+    },
+    "dataFlow": {
+      "ingestion": "PDF → OCR → Text Classification → PolicyDocument Schema → Database",
+      "query": "User Question → Hybrid Search → Context Building → LLM → Response",
+      "coverage": "Item → Check Exclusions → Check Inclusions → Check Conditions → Result"
+    }
+  },
+  "technicalFindings": {
+    "pdfExtraction": {
+      "finding": "PyMuPDF native text extraction is 10x faster than OCR for digital PDFs",
+      "recommendation": "Try native extraction first, fall back to OCR for scanned documents",
+      "implementation": "OCREngine.prefer_native_text = True"
+    },
+    "llmIntegration": {
+      "finding": "Google Gemini 2.5 Flash provides best cost/performance ratio",
+      "recommendation": "Use gemini-2.5-flash as default, support fallback to other providers",
+      "apiKeys": "Store in environment variables, never in code"
+    },
+    "ragOptimization": {
+      "finding": "Hybrid search (BM25 + semantic) outperforms pure semantic search",
+      "recommendation": "Use 0.3 keyword weight + 0.7 semantic weight",
+      "chunking": "Sentence-based chunking with 512 token max works best for policies"
+    },
+    "authentication": {
+      "finding": "bcrypt has 72-byte password limit",
+      "recommendation": "Truncate or hash passwords before bcrypt if using very long passwords"
+    }
+  },
+  "decisions": {
+    "llmProvider": {
+      "decision": "Use Google Gemini as default LLM",
+      "rationale": "Free tier available, fast responses, good accuracy",
+      "alternatives": ["OpenAI GPT-4o", "Anthropic Claude", "Mock for testing"]
+    },
+    "database": {
+      "decision": "SQLite for development, PostgreSQL for production",
+      "rationale": "SQLite requires no setup, PostgreSQL for multi-user production",
+      "migration": "Alembic handles schema versioning"
+    },
+    "vectorStore": {
+      "decision": "In-memory store for MVP, Pinecone/Milvus for production",
+      "rationale": "Simplicity for development, scalability for production"
+    },
+    "authentication": {
+      "decision": "JWT tokens with bcrypt password hashing",
+      "rationale": "Stateless auth, industry standard security"
+    }
+  },
+  "learnings": {
+    "apiKeySecurity": "Never expose API keys in code - they get automatically revoked",
+    "modelAvailability": "Check model availability before hardcoding - models change frequently",
+    "mockServices": "Mock services are essential for testing without API costs",
+    "configFromEnv": "Always read config from environment variables for flexibility",
+    "serviceInitialization": "Use factory functions that respect config settings"
+  },
+  "crossReferences": {
+    "PRD.md": "Product requirements and target JSON schema",
+    "style_guide.md": "UI/UX design guidelines",
+    "tests/TESTING_GUIDE.md": "Testing philosophy and patterns",
+    "docs/USER_GUIDE.md": "End-user documentation",
+    "docs/INVESTOR_DECK.md": "Business overview for investors"
+  }
+}

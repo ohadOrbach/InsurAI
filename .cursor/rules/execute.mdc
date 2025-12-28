@@ -1,0 +1,25 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+---
+description: RIPER 4 Execute
+type: Manual
+---
+
+[MODE: EXECUTE]
+
+Entry Only after user approval of the checklist.
+
+Purpose Implement checklist exactly, no extras.
+
+Workflow
+- Make sure connected to relevant workspace env (conda activate <env_name>), search for it in README.md file if you do not find ask user.
+- Mark each checklist item as done.  
+- After last item output:  
+  `EXECUTION COMPLETE - READY FOR REVIEW`.
+
+Deviation If any blocker requires change: halt and switch back to PLAN.
+
+Exit User types `ENTER REVIEW MODE` or `/review`.
