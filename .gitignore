@@ -24,6 +24,9 @@
 # Memory bank (RIPER workflow state)
 memory-bank/
 
+# Documentation (internal/generated)
+docs/
+
 # Database files
 *.db
 *.sqlite
