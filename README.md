@@ -33,11 +33,12 @@
 InsurAI is a RAG-based (Retrieval-Augmented Generation) conversational AI platform that transforms insurance policy documents into an intelligent, queryable knowledge base. Users can ask natural language questions about their coverage and receive accurate, cited answers.
 
 ```
-User: "Is intentional damage covered?"
+User: "What are the exclusions in my policy?"
 
-AI: "❌ NOT COVERED - Intentional damage is explicitly excluded under 
-    Section 4.2: 'We do not cover loss or damage caused intentionally 
-    by the insured.' [Page 15, Exclusions]"
+AI: "Based on your policy, the following are excluded:
+    1. Pre-existing conditions [Page 5, Section 3.2]
+    2. Self-inflicted injuries [Page 6, Section 3.4]
+    3. Fraudulent claims [Page 8, Section 5.1]"
 ```
 
 ### The Problem We Solve
@@ -55,8 +56,8 @@ AI: "❌ NOT COVERED - Intentional damage is explicitly excluded under
 
 ### 🔍 Intelligent Policy Processing
 - **OCR Engine** - Extract text from scanned PDFs using PaddleOCR
-- **Smart Chunking** - Page-level chunks (2500 chars) optimized for Gemini
-- **LLM Classification** - Gemini labels chunks as exclusion/inclusion/definition
+- **Smart Chunking** - Configurable chunk sizes optimized for your LLM
+- **LLM Classification** - Automatic semantic labeling of policy sections
 - **Semantic Search** - Find relevant policy sections instantly
 
 ### 🛡️ Coverage Guardrail (Air Canada Defense)
@@ -77,10 +78,11 @@ AI: "❌ NOT COVERED - Intentional damage is explicitly excluded under
 - Citation references with page numbers
 - Conversation history
 
-### 🏢 B2B Ready
-- Multi-agent support (one per policy)
-- User-specific limitations injection
-- Persistent storage with PostgreSQL + pgvector
+### 🏢 Multi-Tenant Architecture
+- **Policy Isolation** - Each agent only accesses its own policy data
+- **Multi-agent Support** - One agent per policy with unique policy IDs
+- **User Limitations** - B2B context injection for user-specific constraints
+- **Persistent Storage** - PostgreSQL + pgvector for production-ready data
 
 ---
 

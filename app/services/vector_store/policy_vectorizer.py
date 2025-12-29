@@ -1,12 +1,12 @@
 """
-Policy Vectorizer - Chunks and vectorizes policy documents.
+Policy Vectorizer - Chunks and vectorizes policy documents for semantic search.
 
-Transforms PolicyDocument objects into searchable vector chunks.
+Transforms PolicyDocument objects into searchable vector chunks with:
+- Structured chunks from parsed policy sections
+- Raw text chunks for comprehensive coverage
+- Page-level metadata for accurate citations
 
-PRODUCTION-READY:
-- Supports PGVector for persistent storage
-- Supports OpenAI embeddings for 8k context window
-- Configurable via environment variables
+Supports multiple embedding providers and vector stores via configuration.
 """
 
 import logging
@@ -33,16 +33,9 @@ class PolicyVectorizer:
     """
     Vectorizes policy documents for semantic search.
     
-    Creates searchable chunks from:
-    - Policy metadata
-    - Coverage inclusions/exclusions per category
-    - Financial terms
-    - Client obligations
-    - Service network info
-    
-    PRODUCTION FEATURES:
-    - PGVector support for persistent storage
-    - OpenAI embeddings for 8k context (better for legal text)
+    Creates searchable chunks from policy sections including metadata,
+    coverage details, exclusions, financial terms, and obligations.
+    Configurable vector store and embedding provider.
     """
     
     def __init__(
@@ -288,32 +281,21 @@ class PolicyVectorizer:
         self,
         raw_text: str,
         policy_id: str,
-        chunk_size: int = 2500,  # PAGE-LEVEL: Increased for Gemini's large context
-        chunk_overlap: int = 500,  # More overlap to capture cross-paragraph exclusions
-        page_breaks: Optional[list[int]] = None,  # Character positions of page breaks
-        use_llm_classification: bool = True,  # NEW: Use Gemini for classification
+        chunk_size: int = 2500,
+        chunk_overlap: int = 500,
+        page_breaks: Optional[list[int]] = None,
+        use_llm_classification: bool = True,
     ) -> int:
         """
         Vectorize raw text with smart chunking and auto-classification.
         
-        OPTIMIZED FOR GEMINI:
-        - Page-level chunks (2500 chars) instead of tiny sentences
-        - LLM-based classification replaces brittle regex
-        - Preserves page numbers for citations
-        
-        Features:
-        - Preserves page numbers for citations
-        - Auto-classifies chunks as exclusion/inclusion/definition
-        - Detects section titles
-        - LLM-based classification (when enabled)
-        
         Args:
             raw_text: Full text content of the policy
             policy_id: Policy ID to associate chunks with
-            chunk_size: Target size of each chunk (2500 for page-level)
+            chunk_size: Target size of each chunk
             chunk_overlap: Overlap between chunks for context continuity
-            page_breaks: Character positions where pages break (for page numbers)
-            use_llm_classification: Use Gemini to classify chunks (more accurate)
+            page_breaks: Character positions where pages break (for citations)
+            use_llm_classification: Use LLM for semantic classification
             
         Returns:
             Number of chunks created
@@ -761,6 +743,22 @@ Classifications:"""
         
         return results
     
+    def count_chunks_for_policy(self, policy_id: str) -> int:
+        """
+        Get the number of chunks stored for a specific policy.
+        
+        Used to check if a policy already has data in the vector store,
+        preventing duplicate vectorization when creating agents.
+        
+        Args:
+            policy_id: Policy ID to check
+            
+        Returns:
+            Number of chunks for this policy
+        """
+        return self.vector_store.count_by_policy(policy_id)
+
+
     def remove_policy(self, policy_id: str) -> int:
         """
         Remove all chunks for a policy.

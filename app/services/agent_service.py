@@ -120,12 +120,15 @@ class AgentService:
         import time
         start_time = time.time()
         
+        import uuid
+        
         # Generate agent ID
         agent_id = self._next_id
         self._next_id += 1
         
-        # Generate policy ID if not provided
-        policy_id = data.policy_id or f"POL-{datetime.now().strftime('%Y%m%d')}-{agent_id:04d}"
+        # Generate unique policy ID or link to existing policy
+        explicitly_linked_policy = data.policy_id is not None
+        policy_id = data.policy_id or f"POL-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
         
         logger.info(f"Creating agent '{data.name}' with policy {policy_id}")
         
@@ -167,30 +170,38 @@ class AgentService:
         # Create policy engine for this agent
         policy_engine = PolicyEngine(policy=policy_doc)
         
-        # Vectorize policy for RAG - use structured chunks
-        structured_chunks = self.vectorizer.vectorize_policy(policy_doc)
+        # Check if policy already has data in vector store (for linking to existing policies)
+        existing_chunk_count = self.vectorizer.count_chunks_for_policy(policy_id) if explicitly_linked_policy else 0
         
-        # Also vectorize raw text for comprehensive RAG coverage
-        # This ensures all policy content is searchable, even if structure extraction is incomplete
-        raw_chunks = 0
-        if raw_text and len(raw_text) > 500:  # Only if we have substantial text
-            # Extract page breaks from OCR result for accurate citations
-            page_breaks = None
-            if result and result.ocr_result and result.ocr_result.pages:
-                page_breaks = []
-                char_pos = 0
-                for page in result.ocr_result.pages:
-                    char_pos += len(page.full_text)
-                    page_breaks.append(char_pos)
+        if explicitly_linked_policy and existing_chunk_count > 0:
+            # Link to existing policy data - no need to re-vectorize
+            logger.info(f"Linking to existing policy {policy_id} ({existing_chunk_count} chunks)")
+            structured_chunks = existing_chunk_count
+            raw_chunks = 0
+        else:
+            # Vectorize policy for RAG search
+            structured_chunks = self.vectorizer.vectorize_policy(policy_doc)
             
-            raw_chunks = self.vectorizer.vectorize_raw_text(
-                raw_text=raw_text,
-                policy_id=policy_id,
-                chunk_size=1000,
-                chunk_overlap=200,
-                page_breaks=page_breaks,
-            )
-            logger.info(f"Added {raw_chunks} raw text chunks with page numbers for citations")
+            # Also vectorize raw text for comprehensive coverage
+            raw_chunks = 0
+            if raw_text and len(raw_text) > 500:
+                # Extract page breaks for accurate citations
+                page_breaks = None
+                if result and result.ocr_result and result.ocr_result.pages:
+                    page_breaks = []
+                    char_pos = 0
+                    for page in result.ocr_result.pages:
+                        char_pos += len(page.full_text)
+                        page_breaks.append(char_pos)
+                
+                raw_chunks = self.vectorizer.vectorize_raw_text(
+                    raw_text=raw_text,
+                    policy_id=policy_id,
+                    chunk_size=1000,
+                    chunk_overlap=200,
+                    page_breaks=page_breaks,
+                )
+                logger.info(f"Vectorized {raw_chunks} text chunks with page citations")
         
         # Build coverage summary
         coverage_summary = {

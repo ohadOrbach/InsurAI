@@ -76,31 +76,27 @@ class ChatSession:
 
 
 # System prompt for the insurance AI agent
-INSURANCE_AGENT_SYSTEM_PROMPT = """You are a helpful and knowledgeable insurance policy assistant for Universal Insurance. Your role is to help users understand their insurance coverage, exclusions, and financial terms.
+INSURANCE_AGENT_SYSTEM_PROMPT = """You are a helpful insurance policy assistant. Your role is to help users understand their coverage, exclusions, and financial terms.
 
 ## Your Responsibilities:
-1. **Answer coverage questions** - Help users understand what is and isn't covered by their policy
-2. **Explain exclusions** - Clearly communicate items that are NOT covered
-3. **Clarify financial terms** - Explain deductibles, co-pays, and coverage caps
-4. **Guide on claims** - Help users understand the claims process
-5. **Be friendly and helpful** - Be friendly and helpful in your responses
+1. Answer coverage questions accurately based on policy documents
+2. Clearly communicate what is and isn't covered
+3. Explain financial terms (deductibles, co-pays, caps)
+4. Guide users on claims processes when asked
 
 ## Important Guidelines:
-- ALWAYS reference the policy document when answering questions
-- Be PRECISE about coverage - do not guess or assume
+- ALWAYS reference the policy document when answering
+- Be PRECISE - do not guess or assume coverage
 - When something is EXCLUDED, clearly state it's not covered
-- Always mention relevant DEDUCTIBLES and CAPS
+- Always mention relevant deductibles and coverage limits
 - If unsure, recommend contacting the insurance provider
 
 ## Response Format:
-- Start with a clear answer (Covered/Not Covered/Conditional)
-- Explain the reasoning with specific policy references
-- Include any relevant financial information (deductibles, caps)
-- Add helpful notes about conditions or limitations
-- Add a simple word explanation of the answer in a friendly tone. If the answer is covered, say so and explain why. If the answer is not covered, say so and explain why. If the answer is conditional, say so and explain why.
-- If the question is not related to the policy, say so and suggest contacting the insurance provider
-- If the question is not clear, ask for more information
-- Add a disclaimer that the answers are not legal advice and that the user should contact the insurance provider for legal advice
+- Start with a clear verdict (Covered/Not Covered/Conditional/Requires Review)
+- Explain reasoning with specific policy references
+- Include relevant financial information
+- Keep explanations clear and user-friendly
+- Add disclaimer that this is not legal advice
 
 {context}
 """
@@ -178,10 +174,16 @@ class ChatService:
         """
         context_parts = []
         
-        # 1. RAG Retrieval - Find relevant policy chunks
+        # Log policy filtering for audit trail
+        if policy_id:
+            logger.info(f"RAG Search: policy_id={policy_id}")
+        else:
+            logger.warning("RAG Search: No policy_id filter - searching all policies")
+        
+        # 1. RAG Retrieval - Find relevant policy chunks (FILTERED BY POLICY_ID)
         rag_results = self.vectorizer.search(
             query=user_message,
-            policy_id=policy_id,
+            policy_id=policy_id,  # CRITICAL: This ensures we only search the agent's policy
             top_k=5,
             min_score=0.3,
         )
@@ -241,19 +243,14 @@ class ChatService:
         """
         results = []
         
-        # Common items to look for
+        # Common insurance coverage items to look for
         common_items = [
-            # Engine parts
-            "engine", "piston", "cylinder", "crankshaft", "camshaft",
-            "turbo", "supercharger", "timing belt", "timing chain",
-            # Transmission
-            "gearbox", "transmission", "clutch", "flywheel", "differential",
-            # Electrical
-            "alternator", "starter", "ecu", "battery", "fuel pump",
-            # Cooling
-            "radiator", "thermostat", "cooling fan", "coolant",
-            # Roadside
-            "towing", "jumpstart", "tire change",
+            # Auto/property
+            "engine", "transmission", "battery", "collision", "comprehensive",
+            "liability", "property damage", "theft", "towing",
+            # Health/life
+            "medical", "hospitalization", "surgery", "prescription",
+            "death benefit", "disability",
         ]
         
         message_lower = message.lower()

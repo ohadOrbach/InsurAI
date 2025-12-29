@@ -1,15 +1,14 @@
 """
 Coverage Agent - LangGraph-based Reasoning Loop for Insurance Queries.
 
-Implements the "Coverage Guardrail" pattern:
-1. Router → Classify intent
-2. Exclusion Check → CRITICAL: Check exclusions FIRST (Air Canada defense)
-3. Inclusion Check → Only if not excluded
-4. Financial Context → Deductibles, caps, user limitations
-5. Response → Grounded answer with citations
+Implements the "Coverage Guardrail" pattern to prevent false positives:
+1. Router → Classify user intent
+2. Exclusion Check → CRITICAL: Check what's NOT covered FIRST
+3. Inclusion Check → Only proceed if not excluded
+4. Financial Context → Retrieve deductibles, caps, limitations
+5. Response → Generate grounded answer with citations
 
-This is NOT a pass-through architecture. It's a reasoning loop that
-explicitly checks exclusions before ever claiming coverage.
+Key principle: Never claim something is covered until exclusions are checked.
 """
 
 import logging
@@ -190,31 +189,37 @@ class CoverageAgent:
         """
         CRITICAL GUARDRAIL: Check exclusions FIRST using LLM evaluation.
         
-        This is the "Air Canada defense" - we explicitly check what's
-        NOT covered before ever claiming something IS covered.
-        
-        FIXED: Uses LLM-based semantic evaluation instead of brittle regex.
-        Different carriers use different phrasing:
-        - "We do not insure..."
-        - "The following are not included..."
-        - "Exceptions to coverage include..."
-        - "There is no coverage for..."
-        
-        The LLM evaluates each chunk semantically to determine if it excludes the item.
+        Uses semantic evaluation to detect exclusions regardless of phrasing,
+        since different policies use different wording for the same concept.
+        The LLM evaluates each retrieved chunk to determine if it explicitly
+        excludes the item being checked.
         """
-        state["reasoning_trace"].append("[EXCLUSION_CHECK] Starting LLM-powered exclusion search...")
+        policy_id = state["policy_id"]
+        state["reasoning_trace"].append(f"[EXCLUSION_CHECK] Starting LLM-powered exclusion search (policy: {policy_id})...")
         state["exclusion_results"] = []
         state["coverage_checks"] = []
         
+        # CRITICAL: Ensure we only search within the specific policy
+        if not policy_id:
+            logger.warning("⚠️ Coverage Agent: No policy_id - cannot check exclusions!")
+            return state
+        
+        logger.info(f"🔍 Coverage Agent: Searching exclusions in policy_id={policy_id}")
+        
         for item in state["items_to_check"]:
-            # Step 1: Semantic search for exclusion-related content
-            # Cast a wide net - get all potentially relevant exclusion content
-            exclusion_query = f"what is not covered excluded exception limitation {item}"
+            # SPECIAL CASE: User asking about ALL exclusions
+            if item == "GENERAL_EXCLUSIONS":
+                # Broad search for any exclusion content
+                exclusion_query = "exclusion excluded not covered exception limitation restriction does not include"
+            else:
+                # Step 1: Semantic search for exclusion-related content
+                # Cast a wide net - get all potentially relevant exclusion content
+                exclusion_query = f"what is not covered excluded exception limitation {item}"
             
             results = self.vectorizer.search(
                 query=exclusion_query,
-                policy_id=state["policy_id"],
-                top_k=10,  # Get more candidates for LLM evaluation
+                policy_id=policy_id,  # CRITICAL: Filter by policy
+                top_k=10 if item != "GENERAL_EXCLUSIONS" else 15,  # Get more for general search
                 min_score=0.15,  # Lower threshold - let LLM decide relevance
             )
             
@@ -228,40 +233,90 @@ class CoverageAgent:
             for r in results:
                 chunk = r.chunk
                 
-                # Ask LLM to evaluate this chunk
-                is_exclusion, confidence, reason = await self._llm_evaluate_exclusion(
-                    item=item,
-                    chunk_text=chunk.text,
-                    chunk_type=chunk.chunk_type.value,
-                )
-                
-                if is_exclusion:
-                    exclusion_hits.append({
-                        "text": chunk.text,
-                        "score": r.score,
-                        "chunk_type": chunk.chunk_type.value,
-                        "category": chunk.category,
-                        "page_number": chunk.page_number,
-                        "section_title": chunk.section_title,
-                        "citation": chunk.citation,
-                        "metadata": chunk.metadata,
-                        "llm_confidence": confidence,
-                        "llm_reason": reason,
-                    })
+                # SPECIAL CASE: For general exclusions query, identify what's excluded in chunk
+                if item == "GENERAL_EXCLUSIONS":
+                    has_exclusion, confidence, exclusion_summary = await self._llm_identify_exclusions_in_chunk(
+                        chunk_text=chunk.text,
+                    )
+                    if has_exclusion:
+                        exclusion_hits.append({
+                            "text": chunk.text,
+                            "score": r.score,
+                            "chunk_type": chunk.chunk_type.value,
+                            "category": chunk.category,
+                            "page_number": chunk.page_number,
+                            "section_title": chunk.section_title,
+                            "citation": chunk.citation,
+                            "metadata": chunk.metadata,
+                            "llm_confidence": confidence,
+                            "llm_reason": exclusion_summary,
+                        })
+                else:
+                    # Ask LLM to evaluate this chunk for specific item
+                    is_exclusion, confidence, reason = await self._llm_evaluate_exclusion(
+                        item=item,
+                        chunk_text=chunk.text,
+                        chunk_type=chunk.chunk_type.value,
+                    )
                     
-                    # High confidence exclusion found
-                    if confidence >= 0.8 and not item_excluded:
-                        item_excluded = True
-                        exclusion_text = chunk.text
-                        exclusion_citation = chunk.citation
-                        state["reasoning_trace"].append(
-                            f"[EXCLUSION_CHECK] LLM found exclusion (conf={confidence:.0%}): {reason[:50]}..."
-                        )
+                    if is_exclusion:
+                        exclusion_hits.append({
+                            "text": chunk.text,
+                            "score": r.score,
+                            "chunk_type": chunk.chunk_type.value,
+                            "category": chunk.category,
+                            "page_number": chunk.page_number,
+                            "section_title": chunk.section_title,
+                            "citation": chunk.citation,
+                            "metadata": chunk.metadata,
+                            "llm_confidence": confidence,
+                            "llm_reason": reason,
+                        })
+                        
+                        # High confidence exclusion found
+                        if confidence >= 0.8 and not item_excluded:
+                            item_excluded = True
+                            exclusion_text = chunk.text
+                            exclusion_citation = chunk.citation
+                            state["reasoning_trace"].append(
+                                f"[EXCLUSION_CHECK] LLM found exclusion (conf={confidence:.0%}): {reason[:50]}..."
+                            )
             
             state["exclusion_results"].extend(exclusion_hits)
             
             # Record the check result
-            if item_excluded:
+            if item == "GENERAL_EXCLUSIONS":
+                # For general exclusions query, summarize all found exclusions
+                if exclusion_hits:
+                    exclusion_summaries = [hit.get("llm_reason", "") for hit in exclusion_hits if hit.get("llm_reason")]
+                    citations = [f"[Page {hit.get('page_number', '?')}] {hit.get('llm_reason', '')[:100]}..." for hit in exclusion_hits[:5]]
+                    state["coverage_checks"].append({
+                        "item": "Policy Exclusions",
+                        "decision": "info",  # Not a coverage decision, just info
+                        "reason": f"Found {len(exclusion_hits)} exclusion clause(s) in the policy",
+                        "exclusion_found": True,
+                        "exclusion_text": "\n\n".join(exclusion_summaries[:5]),
+                        "page_number": exclusion_hits[0].get("page_number") if exclusion_hits else None,
+                        "section_title": exclusion_hits[0].get("section_title") if exclusion_hits else None,
+                        "citations": citations,
+                        "llm_reason": f"Found {len(exclusion_hits)} exclusion(s)",
+                    })
+                    state["reasoning_trace"].append(
+                        f"[EXCLUSION_CHECK] Found {len(exclusion_hits)} exclusion clause(s) in policy"
+                    )
+                else:
+                    state["coverage_checks"].append({
+                        "item": "Policy Exclusions",
+                        "decision": "unknown",
+                        "reason": "No explicit exclusion clauses found in the policy",
+                        "exclusion_found": False,
+                        "citations": [],
+                        "llm_reason": "",
+                    })
+                    state["reasoning_trace"].append(
+                        f"[EXCLUSION_CHECK] No explicit exclusion clauses found (searched {len(results)} chunks)"
+                    )
+            elif item_excluded:
                 citation = f"[{exclusion_citation}] " if exclusion_citation else ""
                 state["coverage_checks"].append({
                     "item": item,
@@ -293,13 +348,8 @@ class CoverageAgent:
         """
         Use LLM to semantically evaluate if a chunk excludes an item.
         
-        This handles ALL phrasing variations:
-        - "We do not insure X"
-        - "The following are not included: X"
-        - "Exceptions to coverage: X"
-        - "There is no coverage for X"
-        - "X is excluded"
-        - etc.
+        Handles various phrasing patterns used by different insurers to
+        express exclusions. Returns confidence score to handle edge cases.
         
         Returns:
             tuple of (is_exclusion: bool, confidence: float, reason: str)
@@ -315,19 +365,10 @@ POLICY TEXT:
 
 TASK: Does this text EXPLICITLY state that "{item}" is NOT covered, excluded, or not insured?
 
-Consider ALL phrasing variations including:
-- "We do not insure..."
-- "The following are not included..."
-- "Exceptions to coverage include..."
-- "There is no coverage for..."
-- "Not covered under this policy"
-- Numbered exclusion lists
-
 IMPORTANT:
 - Only return EXCLUDED if the item is EXPLICITLY mentioned as not covered
 - Being near exclusion text is NOT enough - the item must BE the subject of exclusion
-- Partial mentions (e.g., "damage" near "intentional") are NOT conclusive
-- Section headers like "Medical Payments Coverage" followed by exclusions do NOT mean medical coverage is excluded
+- Section headers followed by exclusions do NOT mean the section topic is excluded
 
 Return your analysis as JSON:
 {{
@@ -361,12 +402,67 @@ JSON Response:"""
         # Default: not excluded
         return (False, 0.0, "evaluation_failed")
     
+    async def _llm_identify_exclusions_in_chunk(
+        self,
+        chunk_text: str,
+    ) -> tuple[bool, float, str]:
+        """
+        Use LLM to identify what exclusions are present in a policy chunk.
+        
+        Used for general "list all exclusions" queries where no specific
+        item is mentioned. Returns a summary of excluded items/scenarios.
+        
+        Returns:
+            tuple of (has_exclusion: bool, confidence: float, exclusion_summary: str)
+        """
+        from app.services.llm_service import LLMMessage
+        
+        prompt = f"""You are an insurance policy analyst. Read this policy text and identify any EXCLUSIONS.
+
+POLICY TEXT:
+---
+{chunk_text[:2000]}
+---
+
+TASK: Does this text contain any EXCLUSION clauses (things that are NOT covered)?
+
+Return your analysis as JSON:
+{{
+    "has_exclusions": true/false,
+    "confidence": 0.0-1.0,
+    "exclusion_summary": "Brief summary of what is excluded (max 100 words). If no exclusions, say 'No exclusions found in this text.'"
+}}
+
+JSON Response:"""
+
+        try:
+            messages = [LLMMessage(role="user", content=prompt)]
+            response = await self.llm.generate(messages, temperature=0.0)
+            
+            # Parse JSON response
+            import json
+            import re
+            
+            # Extract JSON from response
+            json_match = re.search(r'\{[^}]+\}', response.content, re.DOTALL)
+            if json_match:
+                result = json.loads(json_match.group())
+                return (
+                    result.get("has_exclusions", False),
+                    result.get("confidence", 0.0),
+                    result.get("exclusion_summary", "No exclusions identified"),
+                )
+        except Exception as e:
+            logger.warning(f"LLM exclusion identification failed: {e}")
+        
+        # Default: no exclusions
+        return (False, 0.0, "evaluation_failed")
+    
     async def _check_inclusions_node(self, state: AgentState) -> AgentState:
         """
         Check for explicit coverage inclusions using LLM evaluation.
-        Only runs if item was NOT excluded in previous node.
-        
-        FIXED: Uses LLM-based semantic evaluation instead of keyword matching.
+        Only runs if item was NOT excluded in the previous node.
+        Uses semantic evaluation for accuracy across different policy formats.
         """
         state["reasoning_trace"].append("[INCLUSION_CHECK] Starting LLM-powered inclusion search...")
         state["inclusion_results"] = []
@@ -678,8 +774,19 @@ JSON Response:"""
         """
         message_lower = message.lower()
         
-        # Simple rule-based classification (can be enhanced with LLM)
-        if any(kw in message_lower for kw in ["covered", "cover", "does my policy", "am i covered", "is my"]):
+        # CRITICAL: Questions about exclusions/coverage MUST go through the coverage check flow
+        # This ensures we use RAG to find policy-specific exclusions
+        coverage_keywords = [
+            # Coverage questions
+            "covered", "cover", "does my policy", "am i covered", "is my",
+            # Exclusion questions - MUST route through exclusion check
+            "exclusion", "excluded", "not covered", "what's not", "what isn't",
+            "exception", "exempt", "limitation", "restricted", "banned",
+            # Inclusion questions
+            "included", "include", "what's covered", "what does my policy",
+        ]
+        
+        if any(kw in message_lower for kw in coverage_keywords):
             intent = QueryIntent.CHECK_COVERAGE
         elif any(kw in message_lower for kw in ["what is", "what does", "define", "mean", "explain"]):
             intent = QueryIntent.EXPLAIN_TERMS
@@ -691,28 +798,31 @@ JSON Response:"""
         # Extract items/scenarios to check
         items = []
         
-        # Standard coverage items
+        # Common insurance coverage items (auto, health, property)
         standard_items = [
-            "engine", "turbo", "transmission", "gearbox", "clutch",
-            "alternator", "starter", "battery", "ecu", "radiator",
-            "brakes", "suspension", "tires", "windshield", "glass",
-            "liability", "collision", "comprehensive", "medical",
-            "uninsured", "underinsured", "towing", "rental car",
-            "bodily injury", "property damage", "theft", "vandalism",
+            # Auto/mechanical
+            "engine", "transmission", "brakes", "suspension", "battery",
+            "collision", "comprehensive", "liability", "towing",
+            # Health/life
+            "medical", "hospitalization", "surgery", "prescription",
+            "death benefit", "disability", "critical illness",
+            # Property
+            "theft", "vandalism", "fire", "flood", "earthquake",
+            "property damage", "bodily injury",
         ]
         
         for item in standard_items:
             if item in message_lower:
                 items.append(item)
         
-        # Check for specific SCENARIOS that are commonly excluded
+        # Common exclusion scenarios across insurance types
         scenario_keywords = {
             "intentional damage": ["intentional", "deliberately", "on purpose"],
-            "racing": ["racing", "competition", "track day"],
-            "commercial use": ["business use", "commercial", "uber", "lyft", "delivery"],
-            "rental to others": ["rent my car", "rent out", "car sharing", "peer-to-peer", "turo"],
-            "drunk driving": ["drunk", "intoxicated", "dui", "alcohol", "impaired"],
-            "unlicensed": ["no license", "unlicensed", "suspended license", "without a license"],
+            "fraud": ["fraud", "misrepresentation", "false statement"],
+            "pre-existing condition": ["pre-existing", "prior condition"],
+            "self-inflicted": ["self-inflicted", "suicide", "self-harm"],
+            "illegal activity": ["illegal", "criminal", "unlawful"],
+            "war": ["war", "terrorism", "civil unrest"],
         }
         
         for scenario, keywords in scenario_keywords.items():
@@ -728,6 +838,23 @@ JSON Response:"""
                          "where", "why", "covered", "cover", "coverage", "policy", "insurance", "car"}
             words = [w for w in message_lower.split() if w not in stop_words and len(w) > 3 and w.isalpha()]
             items = words[:3]
+        
+        # SPECIAL CASE: User asking about ALL exclusions (e.g., "What are the exclusions?")
+        # Use a generic search term to find exclusion-related content
+        exclusion_query_patterns = [
+            "what are the exclusion",  # Also matches "exclusions"
+            "list exclusion",
+            "all exclusion", 
+            "the exclusion",
+            "my exclusion",
+            "show exclusion",
+            "tell me the exclusion",
+            "what exclusion",
+        ]
+        if any(kw in message_lower for kw in exclusion_query_patterns):
+            # Replace unhelpful items with a broad exclusion search
+            items = ["GENERAL_EXCLUSIONS"]  # Special marker for all-exclusions search
+            logger.info(f"[ROUTER] Detected general exclusions query - using GENERAL_EXCLUSIONS marker")
         
         # Remove duplicates while preserving order
         seen = set()

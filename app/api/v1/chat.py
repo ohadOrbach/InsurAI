@@ -25,9 +25,17 @@ router = APIRouter()
 class CreateSessionRequest(BaseModel):
     """Request to create a new chat session."""
     
+    agent_id: Optional[int] = Field(
+        default=None,
+        description="Agent ID to associate with the session (recommended)",
+    )
     policy_id: Optional[str] = Field(
         default=None,
-        description="Optional policy ID to associate with the session",
+        description="Optional policy ID (auto-resolved from agent_id if not provided)",
+    )
+    user_id: Optional[int] = Field(
+        default=None,
+        description="User ID for B2B limitation context",
     )
 
 
@@ -108,13 +116,39 @@ class SessionHistoryResponse(BaseModel):
 Create a new chat session for conversational interaction.
 
 The session maintains conversation history and context for better responses.
-Optionally specify a policy_id to focus the conversation on a specific policy.
+
+**Important:** Each session is linked to a specific agent/policy. The AI will ONLY
+use data from that policy when answering questions.
+
+Pass `agent_id` to automatically resolve the correct policy.
     """,
 )
 async def create_session(request: CreateSessionRequest = CreateSessionRequest()):
-    """Create a new chat session."""
+    """Create a new chat session linked to a specific agent/policy."""
     chat_service = get_chat_service()
-    session = chat_service.create_session(request.policy_id)
+    
+    # Resolve policy_id from agent_id if not provided
+    policy_id = request.policy_id
+    agent_id = request.agent_id
+    
+    if agent_id and not policy_id:
+        # Look up the agent's policy_id
+        from app.services.agent_service import get_agent_service
+        agent_service = get_agent_service()
+        agent = agent_service.get_agent(agent_id)
+        if agent:
+            policy_id = agent.policy_id
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Agent not found: {agent_id}",
+            )
+    
+    session = chat_service.create_session(
+        policy_id=policy_id,
+        agent_id=agent_id,
+        user_id=request.user_id,
+    )
     
     return CreateSessionResponse(
         session_id=session.id,
