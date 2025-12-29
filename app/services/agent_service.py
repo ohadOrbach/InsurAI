@@ -217,6 +217,10 @@ class AgentService:
         processing_time = (time.time() - start_time) * 1000
         
         # Store agent
+        # Calculate if policy qualifies for Whole-Doc Mode (small enough for full context)
+        WHOLE_DOC_THRESHOLD = 50000  # ~30 pages, ~12k tokens
+        is_small_policy = raw_text and len(raw_text) < WHOLE_DOC_THRESHOLD
+        
         agent_data = {
             "id": agent_id,
             "name": data.name,
@@ -238,7 +242,14 @@ class AgentService:
             "policy_summary": policy_engine.get_policy_summary(),
             "coverage_categories": coverage_summary,
             "policy_document": policy_doc,  # Store for chat service
+            # Whole-Doc Mode: Store full text for small policies
+            "full_policy_text": raw_text if is_small_policy else None,
+            "is_small_policy": is_small_policy,
+            "policy_char_count": len(raw_text) if raw_text else 0,
         }
+        
+        if is_small_policy:
+            logger.info(f"Policy qualifies for Whole-Doc Mode ({len(raw_text)} chars < {WHOLE_DOC_THRESHOLD})")
         
         self._agents[agent_id] = agent_data
         
@@ -259,6 +270,22 @@ class AgentService:
         if agent_data:
             return agent_data.get("policy_document")
         return None
+    
+    def get_full_policy_text(self, agent_id: int) -> Optional[str]:
+        """
+        Get full policy text for Whole-Doc Mode.
+        
+        Returns None if policy is too large or text wasn't stored.
+        """
+        agent_data = self._agents.get(agent_id)
+        if agent_data and agent_data.get("is_small_policy"):
+            return agent_data.get("full_policy_text")
+        return None
+    
+    def is_small_policy(self, agent_id: int) -> bool:
+        """Check if an agent's policy qualifies for Whole-Doc Mode."""
+        agent_data = self._agents.get(agent_id)
+        return agent_data.get("is_small_policy", False) if agent_data else False
     
     def list_agents(
         self,

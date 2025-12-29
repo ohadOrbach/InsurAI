@@ -10,11 +10,16 @@ import {
   AlertTriangle,
   Loader2,
   ArrowLeft,
+  ArrowRight,
   Shield,
   Bot,
   Sparkles,
+  File,
+  Hash,
 } from "lucide-react";
 import clsx from "clsx";
+import { ThemeToggle } from "@/components/theme-toggle";
+import { useTheme } from "@/lib/theme-context";
 
 // =============================================================================
 // Types
@@ -75,11 +80,203 @@ async function createAgentFromText(
 }
 
 // =============================================================================
+// Step Indicator Component
+// =============================================================================
+
+function StepIndicator({ 
+  currentStep, 
+  steps 
+}: { 
+  currentStep: number; 
+  steps: { label: string; description: string }[] 
+}) {
+  const { theme } = useTheme();
+  
+  return (
+    <div className="mb-8">
+      {/* Steps */}
+      <div className="flex items-center justify-center gap-0">
+        {steps.map((step, index) => {
+          const stepNum = index + 1;
+          const isActive = stepNum === currentStep;
+          const isCompleted = stepNum < currentStep;
+          
+          return (
+            <div key={index} className="flex items-center">
+              {/* Step Circle */}
+              <div className="flex flex-col items-center">
+                <div
+                  className={clsx(
+                    "w-10 h-10 rounded-full flex items-center justify-center font-semibold text-sm transition-all",
+                    isCompleted
+                      ? "bg-emerald-500 text-white"
+                      : isActive
+                        ? "bg-brand-500 text-white shadow-lg shadow-brand-500/30"
+                        : theme === "dark"
+                          ? "bg-surface-800 text-surface-500 border border-surface-700"
+                          : "bg-slate-100 text-slate-400 border border-slate-200"
+                  )}
+                >
+                  {isCompleted ? <CheckCircle size={20} /> : stepNum}
+                </div>
+                <div className="mt-2 text-center">
+                  <p className={clsx(
+                    "text-sm font-medium",
+                    isActive || isCompleted 
+                      ? theme === "dark" ? "text-white" : "text-slate-900"
+                      : theme === "dark" ? "text-surface-500" : "text-slate-400"
+                  )}>
+                    {step.label}
+                  </p>
+                  <p className={clsx(
+                    "text-xs mt-0.5",
+                    theme === "dark" ? "text-surface-500" : "text-slate-400"
+                  )}>
+                    {step.description}
+                  </p>
+                </div>
+              </div>
+              
+              {/* Connector Line */}
+              {index < steps.length - 1 && (
+                <div className={clsx(
+                  "w-24 h-0.5 mx-4 mb-8",
+                  isCompleted
+                    ? "bg-emerald-500"
+                    : theme === "dark" ? "bg-surface-700" : "bg-slate-200"
+                )} />
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// =============================================================================
+// Summary Card Component
+// =============================================================================
+
+function SummaryCard({
+  file,
+  textContent,
+  agentName,
+  mode,
+}: {
+  file: File | null;
+  textContent: string;
+  agentName: string;
+  mode: "pdf" | "text";
+}) {
+  const { theme } = useTheme();
+  
+  return (
+    <div className={clsx(
+      "rounded-xl p-5 mb-6 border",
+      theme === "dark"
+        ? "bg-gradient-to-br from-surface-800/80 to-surface-800/40 border-surface-700"
+        : "bg-gradient-to-br from-slate-50 to-white border-slate-200"
+    )}>
+      <div className="flex items-center gap-2 mb-4">
+        <div className={clsx(
+          "w-8 h-8 rounded-lg flex items-center justify-center",
+          theme === "dark" ? "bg-brand-500/20" : "bg-brand-500/10"
+        )}>
+          <FileText size={16} className="text-brand-500" />
+        </div>
+        <div>
+          <h3 className={clsx(
+            "text-sm font-semibold",
+            theme === "dark" ? "text-white" : "text-slate-900"
+          )}>
+            Review Before Creating
+          </h3>
+          <p className={clsx(
+            "text-xs",
+            theme === "dark" ? "text-surface-400" : "text-slate-500"
+          )}>
+            Confirm your agent details
+          </p>
+        </div>
+      </div>
+      
+      <div className="space-y-3">
+        {/* Source File/Text */}
+        <div className={clsx(
+          "flex items-center gap-3 p-3 rounded-lg",
+          theme === "dark" ? "bg-surface-900/50" : "bg-slate-100/80"
+        )}>
+          <div className={clsx(
+            "w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0",
+            theme === "dark" ? "bg-surface-700" : "bg-white border border-slate-200"
+          )}>
+            <File size={18} className={theme === "dark" ? "text-surface-400" : "text-slate-500"} />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className={clsx(
+              "text-xs font-medium uppercase tracking-wide mb-0.5",
+              theme === "dark" ? "text-surface-500" : "text-slate-400"
+            )}>
+              Source Document
+            </p>
+            <p className={clsx(
+              "text-sm font-medium truncate",
+              theme === "dark" ? "text-white" : "text-slate-900"
+            )}>
+              {mode === "pdf" ? file?.name : `Pasted text (${textContent.length} chars)`}
+            </p>
+          </div>
+          {mode === "pdf" && file && (
+            <span className={clsx(
+              "text-xs px-2 py-1 rounded-full",
+              theme === "dark" 
+                ? "bg-emerald-500/10 text-emerald-400" 
+                : "bg-emerald-50 text-emerald-600"
+            )}>
+              {(file.size / 1024 / 1024).toFixed(1)} MB
+            </span>
+          )}
+        </div>
+        
+        {/* Agent Name */}
+        <div className={clsx(
+          "flex items-center gap-3 p-3 rounded-lg",
+          theme === "dark" ? "bg-surface-900/50" : "bg-slate-100/80"
+        )}>
+          <div className={clsx(
+            "w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0",
+            theme === "dark" ? "bg-surface-700" : "bg-white border border-slate-200"
+          )}>
+            <Bot size={18} className={theme === "dark" ? "text-surface-400" : "text-slate-500"} />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className={clsx(
+              "text-xs font-medium uppercase tracking-wide mb-0.5",
+              theme === "dark" ? "text-surface-500" : "text-slate-400"
+            )}>
+              Agent Name
+            </p>
+            <p className={clsx(
+              "text-sm font-medium truncate",
+              theme === "dark" ? "text-white" : "text-slate-900"
+            )}>
+              {agentName || "Not set"}
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// =============================================================================
 // Main Page
 // =============================================================================
 
 export default function NewAgentPage() {
   const router = useRouter();
+  const { theme } = useTheme();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [step, setStep] = useState<"upload" | "name">("upload");
@@ -90,6 +287,13 @@ export default function NewAgentPage() {
   const [error, setError] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const [mode, setMode] = useState<"pdf" | "text">("pdf");
+
+  const steps = [
+    { label: "Upload", description: "Add policy document" },
+    { label: "Name", description: "Name your assistant" },
+  ];
+
+  const currentStepNum = step === "upload" ? 1 : 2;
 
   const handleDrag = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -173,56 +377,49 @@ export default function NewAgentPage() {
   return (
     <div className="min-h-screen">
       {/* Header */}
-      <header className="border-b border-surface-800 bg-surface-950/80 backdrop-blur-sm sticky top-0 z-10">
-        <div className="max-w-4xl mx-auto px-6 py-4 flex items-center gap-4">
-          <button
-            onClick={() => router.push("/")}
-            className="p-2 hover:bg-surface-800 rounded-lg transition-colors"
-          >
-            <ArrowLeft className="w-5 h-5 text-surface-400" />
-          </button>
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-brand-500 to-brand-600 flex items-center justify-center shadow-lg shadow-brand-500/20">
-              <Shield size={22} className="text-white" />
-            </div>
-            <div>
-              <h1 className="font-semibold text-white">Create New Agent</h1>
-              <p className="text-xs text-surface-400">
-                {step === "upload" ? "Step 1: Upload Policy" : "Step 2: Name Your Agent"}
-              </p>
+      <header className="header-bar">
+        <div className="max-w-4xl mx-auto px-6 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <button
+              onClick={() => router.push("/")}
+              className={clsx(
+                "p-2 rounded-lg transition-colors",
+                theme === "dark" ? "hover:bg-surface-800" : "hover:bg-slate-100"
+              )}
+            >
+              <ArrowLeft className={clsx(
+                "w-5 h-5",
+                theme === "dark" ? "text-surface-400" : "text-slate-500"
+              )} />
+            </button>
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-brand-500 to-brand-600 flex items-center justify-center shadow-lg shadow-brand-500/20">
+                <Shield size={22} className="text-white" />
+              </div>
+              <div>
+                <h1 className="font-semibold">Create New Agent</h1>
+                <p className={clsx(
+                  "text-xs",
+                  theme === "dark" ? "text-surface-400" : "text-slate-500"
+                )}>
+                  {step === "upload" ? "Step 1 of 2" : "Step 2 of 2"}
+                </p>
+              </div>
             </div>
           </div>
+          
+          <ThemeToggle />
         </div>
       </header>
 
       {/* Main Content */}
       <main className="max-w-4xl mx-auto px-6 py-8">
-        {/* Progress */}
-        <div className="flex items-center gap-4 mb-8">
-          <div className={clsx(
-            "flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium",
-            step === "upload" 
-              ? "bg-brand-500/20 text-brand-400 border border-brand-500/30"
-              : "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
-          )}>
-            {step === "name" ? <CheckCircle size={16} /> : <span className="w-5 h-5 flex items-center justify-center">1</span>}
-            Upload
-          </div>
-          <div className="flex-1 h-px bg-surface-700" />
-          <div className={clsx(
-            "flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium",
-            step === "name"
-              ? "bg-brand-500/20 text-brand-400 border border-brand-500/30"
-              : "bg-surface-800 text-surface-500 border border-surface-700"
-          )}>
-            <span className="w-5 h-5 flex items-center justify-center">2</span>
-            Name
-          </div>
-        </div>
+        {/* Progress Steps */}
+        <StepIndicator currentStep={currentStepNum} steps={steps} />
 
         {/* Error */}
         {error && (
-          <div className="mb-6 p-4 bg-rose-500/10 border border-rose-500/20 rounded-lg text-rose-400 flex items-start gap-3">
+          <div className="mb-6 p-4 bg-rose-500/10 border border-rose-500/20 rounded-lg text-rose-500 flex items-start gap-3">
             <AlertTriangle className="w-5 h-5 mt-0.5" />
             <div>
               <p className="font-medium">Error</p>
@@ -234,8 +431,11 @@ export default function NewAgentPage() {
         {/* Step 1: Upload */}
         {step === "upload" && (
           <div className="card p-8 animate-fade-in">
-            <h2 className="text-2xl font-bold text-white mb-2">Upload Your Policy</h2>
-            <p className="text-surface-400 mb-6">
+            <h2 className="text-2xl font-bold mb-2">Upload Your Policy</h2>
+            <p className={clsx(
+              "mb-6",
+              theme === "dark" ? "text-surface-400" : "text-slate-500"
+            )}>
               Upload a PDF of your insurance policy document. Our AI will analyze it and create a personalized assistant.
             </p>
 
@@ -246,8 +446,10 @@ export default function NewAgentPage() {
                 className={clsx(
                   "flex-1 py-3 px-4 rounded-lg font-medium transition-all flex items-center justify-center gap-2",
                   mode === "pdf"
-                    ? "bg-brand-500/10 text-brand-400 border border-brand-500/30"
-                    : "bg-surface-800 text-surface-400 hover:text-surface-200"
+                    ? "bg-brand-500/10 text-brand-500 border border-brand-500/30"
+                    : theme === "dark"
+                      ? "bg-surface-800 text-surface-400 hover:text-surface-200"
+                      : "bg-slate-100 text-slate-500 hover:text-slate-700"
                 )}
               >
                 <FileText className="w-5 h-5" />
@@ -258,11 +460,13 @@ export default function NewAgentPage() {
                 className={clsx(
                   "flex-1 py-3 px-4 rounded-lg font-medium transition-all flex items-center justify-center gap-2",
                   mode === "text"
-                    ? "bg-brand-500/10 text-brand-400 border border-brand-500/30"
-                    : "bg-surface-800 text-surface-400 hover:text-surface-200"
+                    ? "bg-brand-500/10 text-brand-500 border border-brand-500/30"
+                    : theme === "dark"
+                      ? "bg-surface-800 text-surface-400 hover:text-surface-200"
+                      : "bg-slate-100 text-slate-500 hover:text-slate-700"
                 )}
               >
-                <FileText className="w-5 h-5" />
+                <Hash className="w-5 h-5" />
                 Paste Text
               </button>
             </div>
@@ -280,7 +484,9 @@ export default function NewAgentPage() {
                     ? "border-brand-500 bg-brand-500/10"
                     : file
                     ? "border-emerald-500/50 bg-emerald-500/5"
-                    : "border-surface-700 hover:border-surface-600"
+                    : theme === "dark"
+                      ? "border-surface-700 hover:border-surface-600"
+                      : "border-slate-300 hover:border-slate-400"
                 )}
               >
                 <input
@@ -294,15 +500,18 @@ export default function NewAgentPage() {
                 {file ? (
                   <div className="flex flex-col items-center">
                     <div className="w-16 h-16 rounded-xl bg-emerald-500/10 flex items-center justify-center mb-4">
-                      <CheckCircle className="w-8 h-8 text-emerald-400" />
+                      <CheckCircle className="w-8 h-8 text-emerald-500" />
                     </div>
-                    <p className="text-lg font-medium text-white mb-1">{file.name}</p>
-                    <p className="text-sm text-surface-400 mb-4">
+                    <p className="text-lg font-medium mb-1">{file.name}</p>
+                    <p className={clsx(
+                      "text-sm mb-4",
+                      theme === "dark" ? "text-surface-400" : "text-slate-500"
+                    )}>
                       {(file.size / 1024 / 1024).toFixed(2)} MB
                     </p>
                     <button
                       onClick={() => setFile(null)}
-                      className="text-sm text-rose-400 hover:text-rose-300 flex items-center gap-1"
+                      className="text-sm text-rose-500 hover:text-rose-400 flex items-center gap-1"
                     >
                       <X className="w-4 h-4" />
                       Remove file
@@ -310,13 +519,24 @@ export default function NewAgentPage() {
                   </div>
                 ) : (
                   <div className="flex flex-col items-center">
-                    <div className="w-16 h-16 rounded-xl bg-surface-800 flex items-center justify-center mb-4">
-                      <Upload className="w-8 h-8 text-surface-400" />
+                    <div className={clsx(
+                      "w-16 h-16 rounded-xl flex items-center justify-center mb-4",
+                      theme === "dark" ? "bg-surface-800" : "bg-slate-100"
+                    )}>
+                      <Upload className={clsx(
+                        "w-8 h-8",
+                        theme === "dark" ? "text-surface-400" : "text-slate-400"
+                      )} />
                     </div>
-                    <p className="text-lg font-medium text-white mb-1">
+                    <p className="text-lg font-medium mb-1">
                       Drop your policy PDF here
                     </p>
-                    <p className="text-sm text-surface-400 mb-4">or click to browse</p>
+                    <p className={clsx(
+                      "text-sm mb-4",
+                      theme === "dark" ? "text-surface-400" : "text-slate-500"
+                    )}>
+                      or click to browse
+                    </p>
                     <button
                       onClick={() => fileInputRef.current?.click()}
                       className="btn-secondary"
@@ -338,7 +558,10 @@ export default function NewAgentPage() {
                   rows={12}
                   className="input-field font-mono text-sm resize-none scrollbar-thin"
                 />
-                <p className="text-xs text-surface-500 mt-2">
+                <p className={clsx(
+                  "text-xs mt-2",
+                  theme === "dark" ? "text-surface-500" : "text-slate-400"
+                )}>
                   {textContent.length} characters (minimum 100 required)
                 </p>
               </div>
@@ -352,7 +575,7 @@ export default function NewAgentPage() {
                 className="btn-primary flex items-center gap-2"
               >
                 Continue
-                <ArrowLeft className="w-4 h-4 rotate-180" />
+                <ArrowRight className="w-4 h-4" />
               </button>
             </div>
           </div>
@@ -363,16 +586,21 @@ export default function NewAgentPage() {
           <div className="card p-8 animate-fade-in">
             <div className="flex items-center gap-4 mb-6">
               <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-brand-500/20 to-brand-600/20 flex items-center justify-center">
-                <Bot className="w-8 h-8 text-brand-400" />
+                <Bot className="w-8 h-8 text-brand-500" />
               </div>
               <div>
-                <h2 className="text-2xl font-bold text-white">Name Your Agent</h2>
-                <p className="text-surface-400">Give your insurance assistant a memorable name</p>
+                <h2 className="text-2xl font-bold">Name Your Agent</h2>
+                <p className={theme === "dark" ? "text-surface-400" : "text-slate-500"}>
+                  Give your insurance assistant a memorable name
+                </p>
               </div>
             </div>
 
             <div className="mb-6">
-              <label className="block text-sm font-medium text-surface-300 mb-2">
+              <label className={clsx(
+                "block text-sm font-medium mb-2",
+                theme === "dark" ? "text-surface-300" : "text-slate-700"
+              )}>
                 Agent Name
               </label>
               <input
@@ -383,27 +611,21 @@ export default function NewAgentPage() {
                 className="input-field text-lg"
                 maxLength={50}
               />
-              <p className="text-xs text-surface-500 mt-2">
+              <p className={clsx(
+                "text-xs mt-2",
+                theme === "dark" ? "text-surface-500" : "text-slate-400"
+              )}>
                 You can change this later by clicking the pencil icon
               </p>
             </div>
 
-            {/* Summary */}
-            <div className="bg-surface-800/50 rounded-lg p-4 mb-6">
-              <h3 className="text-sm font-medium text-surface-300 mb-3">Summary</h3>
-              <div className="space-y-2 text-sm">
-                <div className="flex items-center justify-between">
-                  <span className="text-surface-400">Source</span>
-                  <span className="text-white">
-                    {mode === "pdf" ? file?.name : `${textContent.length} characters`}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-surface-400">Agent Name</span>
-                  <span className="text-white">{agentName || "—"}</span>
-                </div>
-              </div>
-            </div>
+            {/* Summary Card */}
+            <SummaryCard
+              file={file}
+              textContent={textContent}
+              agentName={agentName}
+              mode={mode}
+            />
 
             {/* Actions */}
             <div className="flex items-center justify-between">
@@ -438,4 +660,3 @@ export default function NewAgentPage() {
     </div>
   );
 }
-

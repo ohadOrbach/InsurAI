@@ -1,16 +1,22 @@
 """
 Coverage Agent - LangGraph-based Reasoning Loop for Insurance Queries.
 
-Implements the "Coverage Guardrail" pattern to prevent false positives:
-1. Router → Classify user intent
-2. Exclusion Check → CRITICAL: Check what's NOT covered FIRST
-3. Inclusion Check → Only proceed if not excluded
-4. Financial Context → Retrieve deductibles, caps, limitations
-5. Response → Generate grounded answer with citations
+OPTIMIZED FLOW (3 LLM calls instead of 5):
+1. Router → Classify intent + extract items
+2. Retrieve → Fetch relevant chunks + ALWAYS include definitions
+3. Exclusion Check → GATEKEEPER: If excluded, stream denial immediately
+4. Reasoning → MERGED: Check inclusion AND extract financials in ONE call
+5. Response → Stream final answer with citations
 
-Key principle: Never claim something is covered until exclusions are checked.
+Key optimizations:
+- Merged inclusion + financial checks to reduce latency
+- Definitions always injected for context
+- Early exit on exclusion detection
+- WHOLE-DOC MODE: For small policies (<30 pages), skip RAG and pass entire doc to LLM
+- PARALLEL PROCESSING: Multiple items checked concurrently via asyncio.gather()
 """
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
@@ -78,9 +84,17 @@ class AgentState(TypedDict):
     user_id: Optional[int]
     agent_id: Optional[int]
     
+    # Whole-Doc Mode (for small policies)
+    full_policy_text: Optional[str]  # Full policy text if small enough
+    use_whole_doc_mode: bool         # Flag to use simplified flow
+    
     # Classification
     intent: str
     items_to_check: list[str]
+    
+    # Retrieved context
+    retrieved_chunks: list[dict]
+    definitions_context: str
     
     # Search Results (with citations)
     exclusion_results: list[dict]
@@ -119,46 +133,70 @@ class CoverageAgent:
         self.graph = self._build_graph()
     
     def _build_graph(self) -> StateGraph:
-        """Build the LangGraph workflow."""
+        """
+        Build the OPTIMIZED LangGraph workflow.
+        
+        Two Modes:
+        1. WHOLE-DOC MODE (small policies <30 pages):
+           Router → whole_doc_response (1 LLM call with full document)
+           
+        2. RAG MODE (large policies):
+           Router → Retrieve → Exclusion → Reasoning → Response
+        
+        Optimizations:
+        - Whole-doc mode skips chunking entirely for small policies
+        - Retrieval includes definitions for context
+        - Inclusion + Financial merged into single Reasoning node
+        - Early exit if excluded
+        """
         workflow = StateGraph(AgentState)
         
         # Add nodes
         workflow.add_node("router", self._router_node)
+        workflow.add_node("whole_doc_response", self._whole_doc_response_node)  # NEW: Full doc mode
+        workflow.add_node("retrieve", self._retrieve_node)
         workflow.add_node("check_exclusions", self._check_exclusions_node)
-        workflow.add_node("check_inclusions", self._check_inclusions_node)
-        workflow.add_node("get_financial_context", self._get_financial_context_node)
+        workflow.add_node("reasoning", self._reasoning_node)
         workflow.add_node("build_response", self._build_response_node)
         
         # Set entry point
         workflow.set_entry_point("router")
         
-        # Add conditional edges from router
+        # Router → Whole-Doc OR Retrieve based on policy size
         workflow.add_conditional_edges(
             "router",
-            self._route_by_intent,
+            self._route_by_policy_size,
             {
-                "check_coverage": "check_exclusions",  # Coverage checks go to exclusion guard
-                "explain_terms": "build_response",      # Direct to response
-                "get_limits": "get_financial_context",  # Direct to financial
-                "general_info": "build_response",       # Direct to response
+                "whole_doc": "whole_doc_response",  # Small policy → 1 LLM call
+                "rag_retrieve": "retrieve",          # Large policy → RAG flow
             }
         )
         
-        # Exclusion check decides next step
+        # Whole-doc response is terminal
+        workflow.add_edge("whole_doc_response", END)
+        
+        # Retrieve → Exclusion Check (for coverage) or Response (for other intents)
+        workflow.add_conditional_edges(
+            "retrieve",
+            self._route_after_retrieve,
+            {
+                "check_exclusions": "check_exclusions",
+                "direct_response": "build_response",
+            }
+        )
+        
+        # Exclusion check decides next step (GATEKEEPER)
         workflow.add_conditional_edges(
             "check_exclusions",
             self._route_after_exclusion_check,
             {
-                "excluded": "build_response",      # STOP - item is excluded
-                "not_excluded": "check_inclusions", # Continue checking
+                "excluded": "build_response",    # STOP - item is excluded
+                "not_excluded": "reasoning",     # Continue to merged reasoning
             }
         )
         
-        # After inclusion check
-        workflow.add_edge("check_inclusions", "get_financial_context")
-        
-        # After financial context
-        workflow.add_edge("get_financial_context", "build_response")
+        # Reasoning → Response (single step, no more financial node)
+        workflow.add_edge("reasoning", "build_response")
         
         # Response is the end
         workflow.add_edge("build_response", END)
@@ -185,6 +223,62 @@ class CoverageAgent:
         
         return state
     
+    async def _retrieve_node(self, state: AgentState) -> AgentState:
+        """
+        Retrieval Node: Fetch relevant chunks + ALWAYS include definitions.
+        
+        This ensures the LLM has proper context for policy-specific terms.
+        """
+        policy_id = state["policy_id"]
+        state["reasoning_trace"].append(f"[RETRIEVE] Fetching context for policy {policy_id}...")
+        
+        # Initialize retrieval results
+        state["retrieved_chunks"] = []
+        state["definitions_context"] = ""
+        
+        if not policy_id:
+            logger.warning("No policy_id - skipping retrieval")
+            return state
+        
+        # 1. ALWAYS retrieve definitions section for context
+        definitions_results = self.vectorizer.search(
+            query="definitions terms defined in this policy means refers to",
+            policy_id=policy_id,
+            top_k=5,
+            min_score=0.2,
+        )
+        
+        definitions_text = []
+        for r in definitions_results:
+            chunk = r.chunk
+            if chunk.chunk_type.value in ["definition", "policy_meta"] or "defin" in chunk.text.lower():
+                definitions_text.append(chunk.text)
+        
+        if definitions_text:
+            state["definitions_context"] = "\n---\n".join(definitions_text[:3])
+            state["reasoning_trace"].append(f"[RETRIEVE] Found {len(definitions_text)} definition chunks")
+        
+        # 2. Retrieve chunks relevant to the user's query
+        query_results = self.vectorizer.search(
+            query=state["user_message"],
+            policy_id=policy_id,
+            top_k=8,
+            min_score=0.2,
+        )
+        
+        for r in query_results:
+            state["retrieved_chunks"].append({
+                "text": r.chunk.text,
+                "score": r.score,
+                "chunk_type": r.chunk.chunk_type.value,
+                "page_number": r.chunk.page_number,
+                "section_title": r.chunk.section_title,
+            })
+        
+        state["reasoning_trace"].append(f"[RETRIEVE] Retrieved {len(query_results)} relevant chunks")
+        
+        return state
+    
     async def _check_exclusions_node(self, state: AgentState) -> AgentState:
         """
         CRITICAL GUARDRAIL: Check exclusions FIRST using LLM evaluation.
@@ -193,9 +287,15 @@ class CoverageAgent:
         since different policies use different wording for the same concept.
         The LLM evaluates each retrieved chunk to determine if it explicitly
         excludes the item being checked.
+        
+        OPTIMIZATION: Multiple items are checked IN PARALLEL using asyncio.gather()
+        for significant latency reduction when users ask about multiple items.
         """
         policy_id = state["policy_id"]
-        state["reasoning_trace"].append(f"[EXCLUSION_CHECK] Starting LLM-powered exclusion search (policy: {policy_id})...")
+        items_count = len(state["items_to_check"])
+        state["reasoning_trace"].append(
+            f"[EXCLUSION_CHECK] Starting PARALLEL exclusion search for {items_count} item(s) (policy: {policy_id})..."
+        )
         state["exclusion_results"] = []
         state["coverage_checks"] = []
         
@@ -204,140 +304,178 @@ class CoverageAgent:
             logger.warning("⚠️ Coverage Agent: No policy_id - cannot check exclusions!")
             return state
         
-        logger.info(f"🔍 Coverage Agent: Searching exclusions in policy_id={policy_id}")
+        logger.info(f"🔍 Coverage Agent: Parallel exclusion check for {items_count} items in policy_id={policy_id}")
         
-        for item in state["items_to_check"]:
-            # SPECIAL CASE: User asking about ALL exclusions
-            if item == "GENERAL_EXCLUSIONS":
-                # Broad search for any exclusion content
-                exclusion_query = "exclusion excluded not covered exception limitation restriction does not include"
-            else:
-                # Step 1: Semantic search for exclusion-related content
-                # Cast a wide net - get all potentially relevant exclusion content
-                exclusion_query = f"what is not covered excluded exception limitation {item}"
+        # PARALLEL PROCESSING: Check all items concurrently
+        if items_count > 1:
+            # Run all item checks in parallel
+            tasks = [
+                self._check_single_item_exclusion(item, policy_id)
+                for item in state["items_to_check"]
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
             
-            results = self.vectorizer.search(
-                query=exclusion_query,
-                policy_id=policy_id,  # CRITICAL: Filter by policy
-                top_k=10 if item != "GENERAL_EXCLUSIONS" else 15,  # Get more for general search
-                min_score=0.15,  # Lower threshold - let LLM decide relevance
-            )
-            
-            # Step 2: LLM evaluation of each chunk
-            # Instead of regex, ask the LLM if the chunk excludes the item
-            exclusion_hits = []
-            item_excluded = False
-            exclusion_text = None
-            exclusion_citation = None
-            
-            for r in results:
-                chunk = r.chunk
+            # Process results
+            for item, result in zip(state["items_to_check"], results):
+                if isinstance(result, Exception):
+                    logger.error(f"Exclusion check failed for {item}: {result}")
+                    state["reasoning_trace"].append(f"[EXCLUSION_CHECK] ⚠️ Error checking {item}: {str(result)[:50]}")
+                    continue
                 
-                # SPECIAL CASE: For general exclusions query, identify what's excluded in chunk
-                if item == "GENERAL_EXCLUSIONS":
-                    has_exclusion, confidence, exclusion_summary = await self._llm_identify_exclusions_in_chunk(
-                        chunk_text=chunk.text,
-                    )
-                    if has_exclusion:
-                        exclusion_hits.append({
-                            "text": chunk.text,
-                            "score": r.score,
-                            "chunk_type": chunk.chunk_type.value,
-                            "category": chunk.category,
-                            "page_number": chunk.page_number,
-                            "section_title": chunk.section_title,
-                            "citation": chunk.citation,
-                            "metadata": chunk.metadata,
-                            "llm_confidence": confidence,
-                            "llm_reason": exclusion_summary,
-                        })
-                else:
-                    # Ask LLM to evaluate this chunk for specific item
-                    is_exclusion, confidence, reason = await self._llm_evaluate_exclusion(
-                        item=item,
-                        chunk_text=chunk.text,
-                        chunk_type=chunk.chunk_type.value,
-                    )
-                    
-                    if is_exclusion:
-                        exclusion_hits.append({
-                            "text": chunk.text,
-                            "score": r.score,
-                            "chunk_type": chunk.chunk_type.value,
-                            "category": chunk.category,
-                            "page_number": chunk.page_number,
-                            "section_title": chunk.section_title,
-                            "citation": chunk.citation,
-                            "metadata": chunk.metadata,
-                            "llm_confidence": confidence,
-                            "llm_reason": reason,
-                        })
-                        
-                        # High confidence exclusion found
-                        if confidence >= 0.8 and not item_excluded:
-                            item_excluded = True
-                            exclusion_text = chunk.text
-                            exclusion_citation = chunk.citation
-                            state["reasoning_trace"].append(
-                                f"[EXCLUSION_CHECK] LLM found exclusion (conf={confidence:.0%}): {reason[:50]}..."
-                            )
-            
-            state["exclusion_results"].extend(exclusion_hits)
-            
-            # Record the check result
-            if item == "GENERAL_EXCLUSIONS":
-                # For general exclusions query, summarize all found exclusions
-                if exclusion_hits:
-                    exclusion_summaries = [hit.get("llm_reason", "") for hit in exclusion_hits if hit.get("llm_reason")]
-                    citations = [f"[Page {hit.get('page_number', '?')}] {hit.get('llm_reason', '')[:100]}..." for hit in exclusion_hits[:5]]
-                    state["coverage_checks"].append({
-                        "item": "Policy Exclusions",
-                        "decision": "info",  # Not a coverage decision, just info
-                        "reason": f"Found {len(exclusion_hits)} exclusion clause(s) in the policy",
-                        "exclusion_found": True,
-                        "exclusion_text": "\n\n".join(exclusion_summaries[:5]),
-                        "page_number": exclusion_hits[0].get("page_number") if exclusion_hits else None,
-                        "section_title": exclusion_hits[0].get("section_title") if exclusion_hits else None,
-                        "citations": citations,
-                        "llm_reason": f"Found {len(exclusion_hits)} exclusion(s)",
-                    })
-                    state["reasoning_trace"].append(
-                        f"[EXCLUSION_CHECK] Found {len(exclusion_hits)} exclusion clause(s) in policy"
-                    )
-                else:
-                    state["coverage_checks"].append({
-                        "item": "Policy Exclusions",
-                        "decision": "unknown",
-                        "reason": "No explicit exclusion clauses found in the policy",
-                        "exclusion_found": False,
-                        "citations": [],
-                        "llm_reason": "",
-                    })
-                    state["reasoning_trace"].append(
-                        f"[EXCLUSION_CHECK] No explicit exclusion clauses found (searched {len(results)} chunks)"
-                    )
-            elif item_excluded:
-                citation = f"[{exclusion_citation}] " if exclusion_citation else ""
-                state["coverage_checks"].append({
-                    "item": item,
-                    "decision": CoverageDecision.NOT_COVERED.value,
-                    "reason": f"Excluded per LLM analysis",
-                    "exclusion_found": True,
-                    "exclusion_text": exclusion_text,
-                    "page_number": exclusion_hits[0].get("page_number") if exclusion_hits else None,
-                    "section_title": exclusion_hits[0].get("section_title") if exclusion_hits else None,
-                    "citations": [f"{citation}{exclusion_text[:150]}..." if exclusion_text else ""],
-                    "llm_reason": exclusion_hits[0].get("llm_reason", "") if exclusion_hits else "",
-                })
-                state["reasoning_trace"].append(
-                    f"[EXCLUSION_CHECK] ❌ {item} EXCLUDED {citation}"
-                )
-            else:
-                state["reasoning_trace"].append(
-                    f"[EXCLUSION_CHECK] ✓ {item} not found in exclusions (checked {len(results)} chunks)"
-                )
+                exclusion_hits, coverage_check, trace_msg = result
+                state["exclusion_results"].extend(exclusion_hits)
+                if coverage_check:
+                    state["coverage_checks"].append(coverage_check)
+                state["reasoning_trace"].append(trace_msg)
+        else:
+            # Single item - no need for parallelization overhead
+            for item in state["items_to_check"]:
+                exclusion_hits, coverage_check, trace_msg = await self._check_single_item_exclusion(item, policy_id)
+                state["exclusion_results"].extend(exclusion_hits)
+                if coverage_check:
+                    state["coverage_checks"].append(coverage_check)
+                state["reasoning_trace"].append(trace_msg)
         
         return state
+    
+    async def _check_single_item_exclusion(
+        self, 
+        item: str, 
+        policy_id: str
+    ) -> tuple[list[dict], Optional[dict], str]:
+        """
+        Check exclusion for a SINGLE item. Designed to be called in parallel.
+        
+        Returns:
+            tuple of (exclusion_hits, coverage_check_dict, trace_message)
+        """
+        # SPECIAL CASE: User asking about ALL exclusions
+        if item == "GENERAL_EXCLUSIONS":
+            exclusion_query = "exclusion excluded not covered exception limitation restriction does not include"
+            top_k = 15
+        else:
+            exclusion_query = f"what is not covered excluded exception limitation {item}"
+            top_k = 10
+        
+        results = self.vectorizer.search(
+            query=exclusion_query,
+            policy_id=policy_id,
+            top_k=top_k,
+            min_score=0.15,
+        )
+        
+        exclusion_hits = []
+        item_excluded = False
+        exclusion_text = None
+        exclusion_citation = None
+        
+        # PARALLEL LLM evaluation of chunks for this item
+        if item == "GENERAL_EXCLUSIONS":
+            # For general query, check all chunks in parallel
+            chunk_tasks = [
+                self._llm_identify_exclusions_in_chunk(r.chunk.text)
+                for r in results
+            ]
+            chunk_results = await asyncio.gather(*chunk_tasks, return_exceptions=True)
+            
+            for r, chunk_result in zip(results, chunk_results):
+                if isinstance(chunk_result, Exception):
+                    continue
+                has_exclusion, confidence, exclusion_summary = chunk_result
+                if has_exclusion:
+                    exclusion_hits.append({
+                        "text": r.chunk.text,
+                        "score": r.score,
+                        "chunk_type": r.chunk.chunk_type.value,
+                        "category": r.chunk.category,
+                        "page_number": r.chunk.page_number,
+                        "section_title": r.chunk.section_title,
+                        "citation": r.chunk.citation,
+                        "metadata": r.chunk.metadata,
+                        "llm_confidence": confidence,
+                        "llm_reason": exclusion_summary,
+                    })
+        else:
+            # For specific item, check all chunks in parallel
+            chunk_tasks = [
+                self._llm_evaluate_exclusion(item, r.chunk.text, r.chunk.chunk_type.value)
+                for r in results
+            ]
+            chunk_results = await asyncio.gather(*chunk_tasks, return_exceptions=True)
+            
+            for r, chunk_result in zip(results, chunk_results):
+                if isinstance(chunk_result, Exception):
+                    continue
+                is_exclusion, confidence, reason = chunk_result
+                
+                if is_exclusion:
+                    exclusion_hits.append({
+                        "text": r.chunk.text,
+                        "score": r.score,
+                        "chunk_type": r.chunk.chunk_type.value,
+                        "category": r.chunk.category,
+                        "page_number": r.chunk.page_number,
+                        "section_title": r.chunk.section_title,
+                        "citation": r.chunk.citation,
+                        "metadata": r.chunk.metadata,
+                        "llm_confidence": confidence,
+                        "llm_reason": reason,
+                    })
+                    
+                    # High confidence exclusion found
+                    if confidence >= 0.8 and not item_excluded:
+                        item_excluded = True
+                        exclusion_text = r.chunk.text
+                        exclusion_citation = r.chunk.citation
+        
+        # Build coverage check result
+        coverage_check = None
+        trace_msg = ""
+        
+        if item == "GENERAL_EXCLUSIONS":
+            if exclusion_hits:
+                exclusion_summaries = [hit.get("llm_reason", "") for hit in exclusion_hits if hit.get("llm_reason")]
+                citations = [f"[Page {hit.get('page_number', '?')}] {hit.get('llm_reason', '')[:100]}..." for hit in exclusion_hits[:5]]
+                coverage_check = {
+                    "item": "Policy Exclusions",
+                    "decision": "info",
+                    "reason": f"Found {len(exclusion_hits)} exclusion clause(s) in the policy",
+                    "exclusion_found": True,
+                    "exclusion_text": "\n\n".join(exclusion_summaries[:5]),
+                    "page_number": exclusion_hits[0].get("page_number") if exclusion_hits else None,
+                    "section_title": exclusion_hits[0].get("section_title") if exclusion_hits else None,
+                    "citations": citations,
+                    "llm_reason": f"Found {len(exclusion_hits)} exclusion(s)",
+                }
+                trace_msg = f"[EXCLUSION_CHECK] Found {len(exclusion_hits)} exclusion clause(s) in policy"
+            else:
+                coverage_check = {
+                    "item": "Policy Exclusions",
+                    "decision": "unknown",
+                    "reason": "No explicit exclusion clauses found in the policy",
+                    "exclusion_found": False,
+                    "citations": [],
+                    "llm_reason": "",
+                }
+                trace_msg = f"[EXCLUSION_CHECK] No explicit exclusion clauses found (searched {len(results)} chunks)"
+        elif item_excluded:
+            citation = f"[{exclusion_citation}] " if exclusion_citation else ""
+            coverage_check = {
+                "item": item,
+                "decision": CoverageDecision.NOT_COVERED.value,
+                "reason": "Excluded per LLM analysis",
+                "exclusion_found": True,
+                "exclusion_text": exclusion_text,
+                "page_number": exclusion_hits[0].get("page_number") if exclusion_hits else None,
+                "section_title": exclusion_hits[0].get("section_title") if exclusion_hits else None,
+                "citations": [f"{citation}{exclusion_text[:150]}..." if exclusion_text else ""],
+                "llm_reason": exclusion_hits[0].get("llm_reason", "") if exclusion_hits else "",
+            }
+            trace_msg = f"[EXCLUSION_CHECK] ❌ {item} EXCLUDED {citation}"
+        else:
+            trace_msg = f"[EXCLUSION_CHECK] ✓ {item} not found in exclusions (checked {len(results)} chunks)"
+        
+        return exclusion_hits, coverage_check, trace_msg
     
     async def _llm_evaluate_exclusion(
         self,
@@ -633,59 +771,151 @@ JSON Response:"""
         # Default: not covered
         return (False, 0.0, "evaluation_failed")
     
-    async def _get_financial_context_node(self, state: AgentState) -> AgentState:
+    async def _reasoning_node(self, state: AgentState) -> AgentState:
         """
-        Get financial context: deductibles, caps, user limitations.
+        MERGED Reasoning Node: Check inclusion AND extract financial terms in ONE LLM call.
+        
+        This reduces latency by combining what were previously 2 separate nodes.
+        The LLM evaluates coverage AND extracts deductibles/limits simultaneously.
         """
-        state["reasoning_trace"].append("[FINANCIAL] Getting financial context...")
+        state["reasoning_trace"].append("[REASONING] Checking coverage + extracting financials (merged)...")
+        state["inclusion_results"] = state.get("inclusion_results", [])
         state["financial_results"] = []
-        state["user_limitations"] = []
         
-        # Search for financial terms
-        for item in state["items_to_check"]:
-            financial_query = f"deductible {item} limit cap payment"
+        # Get items not already excluded
+        excluded_items = {
+            c["item"] for c in state.get("coverage_checks", [])
+            if c.get("exclusion_found")
+        }
+        items_to_check = [
+            item for item in state["items_to_check"]
+            if item not in excluded_items and item != "GENERAL_EXCLUSIONS"
+        ]
+        
+        if not items_to_check:
+            return state
+        
+        # Build context including definitions
+        context_chunks = state.get("retrieved_chunks", [])[:5]
+        definitions = state.get("definitions_context", "")
+        
+        context_text = ""
+        if definitions:
+            context_text += f"## POLICY DEFINITIONS:\n{definitions}\n\n"
+        
+        context_text += "## RELEVANT POLICY SECTIONS:\n"
+        for i, chunk in enumerate(context_chunks, 1):
+            context_text += f"[{i}] {chunk['text'][:500]}...\n\n"
+        
+        # MERGED LLM call: Check coverage AND extract financials
+        from app.services.llm_service import LLMMessage
+        
+        items_str = ", ".join(items_to_check)
+        prompt = f"""You are an insurance policy analyst. Analyze the policy context below.
+
+POLICY CONTEXT:
+{context_text[:4000]}
+
+TASK: For each item in [{items_str}], determine:
+1. Is it EXPLICITLY covered in this policy?
+2. What are the relevant financial terms (deductible, limit, cap)?
+
+Return your analysis as JSON:
+{{
+    "items": [
+        {{
+            "item": "item name",
+            "is_covered": true/false,
+            "confidence": 0.0-1.0,
+            "coverage_reason": "brief explanation of coverage status",
+            "deductible": "amount if found, null otherwise",
+            "coverage_limit": "limit/cap if found, null otherwise",
+            "relevant_excerpt": "key policy text supporting this"
+        }}
+    ]
+}}
+
+IMPORTANT:
+- Only mark as covered if EXPLICITLY stated in the policy
+- Include financial terms if mentioned for the item
+- Be specific about which section/page supports your conclusion
+
+JSON Response:"""
+
+        try:
+            messages = [LLMMessage(role="user", content=prompt)]
+            response = await self.llm.generate(messages, temperature=0.0)
             
-            results = self.vectorizer.search(
-                query=financial_query,
-                policy_id=state["policy_id"],
-                top_k=3,
-                min_score=0.25,
-            )
+            import json
+            import re
             
-            for r in results:
-                chunk = r.chunk
-                if any(kw in chunk.text.lower() for kw in ["deductible", "limit", "cap", "payment", "amount"]):
-                    state["financial_results"].append({
-                        "text": chunk.text,
-                        "score": r.score,
-                        "category": chunk.category,
-                    })
+            # Extract JSON from response
+            json_match = re.search(r'\{[\s\S]*\}', response.content)
+            if json_match:
+                result = json.loads(json_match.group())
+                
+                for item_result in result.get("items", []):
+                    item_name = item_result.get("item", "")
+                    is_covered = item_result.get("is_covered", False)
+                    confidence = item_result.get("confidence", 0.0)
                     
-                    # Try to extract deductible/cap for matching items
-                    for check in state["coverage_checks"]:
-                        if check["item"].lower() in chunk.text.lower():
-                            # Simple extraction (could be enhanced with LLM)
-                            if "deductible" in chunk.text.lower():
-                                check["deductible_info"] = chunk.text[:200]
-        
-        # Get user limitations (B2B context)
-        if state.get("user_id") and state.get("agent_id"):
-            state["reasoning_trace"].append(
-                f"[FINANCIAL] Checking user limitations for user {state['user_id']}"
-            )
-            # This would query the user_limitations table
-            # For now, we'll leave this as a placeholder
+                    # Update or create coverage check
+                    existing_check = next(
+                        (c for c in state["coverage_checks"] if c["item"].lower() == item_name.lower()),
+                        None
+                    )
+                    
+                    if existing_check:
+                        existing_check["inclusion_found"] = is_covered
+                        existing_check["inclusion_text"] = item_result.get("relevant_excerpt", "")
+                        if is_covered and not existing_check.get("exclusion_found"):
+                            existing_check["decision"] = CoverageDecision.COVERED.value
+                            existing_check["reason"] = item_result.get("coverage_reason", "Covered")
+                        # Add financial info
+                        if item_result.get("deductible"):
+                            existing_check["deductible_info"] = item_result["deductible"]
+                        if item_result.get("coverage_limit"):
+                            existing_check["limit_info"] = item_result["coverage_limit"]
+                    else:
+                        state["coverage_checks"].append({
+                            "item": item_name,
+                            "decision": CoverageDecision.COVERED.value if is_covered else CoverageDecision.UNKNOWN.value,
+                            "reason": item_result.get("coverage_reason", "No explicit coverage found"),
+                            "exclusion_found": False,
+                            "inclusion_found": is_covered,
+                            "inclusion_text": item_result.get("relevant_excerpt", ""),
+                            "deductible_info": item_result.get("deductible"),
+                            "limit_info": item_result.get("coverage_limit"),
+                            "citations": [],
+                            "llm_reason": item_result.get("coverage_reason", ""),
+                        })
+                    
+                    state["reasoning_trace"].append(
+                        f"[REASONING] {'✅' if is_covered else '❓'} {item_name}: "
+                        f"{item_result.get('coverage_reason', 'No info')[:50]}..."
+                    )
+                    
+        except Exception as e:
+            logger.warning(f"Merged reasoning failed: {e}")
+            state["reasoning_trace"].append(f"[REASONING] Error: {str(e)[:50]}")
         
         return state
     
     async def _build_response_node(self, state: AgentState) -> AgentState:
         """
         Build the final response with citations and reasoning.
+        
+        Uses retrieved context including definitions for accurate response.
         """
         state["reasoning_trace"].append("[RESPONSE] Building final response...")
         
         # Compile context for LLM
         context_parts = []
+        
+        # Include definitions for context (always helpful)
+        if state.get("definitions_context"):
+            context_parts.append("## POLICY DEFINITIONS:")
+            context_parts.append(state["definitions_context"][:1000])
         
         # Coverage decisions
         for check in state.get("coverage_checks", []):
@@ -706,18 +936,28 @@ JSON Response:"""
                 context_parts.append(f"   📜 Exclusion: \"{check['exclusion_text'][:150]}...\"")
             if check.get("inclusion_text"):
                 context_parts.append(f"   📜 Coverage: \"{check['inclusion_text'][:150]}...\"")
+            if check.get("deductible_info"):
+                context_parts.append(f"   💰 Deductible: {check['deductible_info']}")
+            if check.get("limit_info"):
+                context_parts.append(f"   📊 Limit: {check['limit_info']}")
         
-        # RAG context (top relevant chunks)
-        all_results = (
-            state.get("exclusion_results", [])[:3] +
-            state.get("inclusion_results", [])[:3] +
-            state.get("financial_results", [])[:2]
-        )
-        
-        if all_results:
+        # Retrieved chunks (from new retrieve node)
+        retrieved_chunks = state.get("retrieved_chunks", [])
+        if retrieved_chunks:
             context_parts.append("\n## RELEVANT POLICY EXCERPTS:")
-            for i, r in enumerate(all_results[:5], 1):
-                context_parts.append(f"{i}. [{r.get('chunk_type', 'text')}] {r['text'][:300]}...")
+            for i, chunk in enumerate(retrieved_chunks[:5], 1):
+                context_parts.append(f"{i}. [{chunk.get('chunk_type', 'text')}] {chunk['text'][:300]}...")
+        
+        # Fallback to old-style results if no retrieved chunks
+        if not retrieved_chunks:
+            all_results = (
+                state.get("exclusion_results", [])[:3] +
+                state.get("inclusion_results", [])[:3]
+            )
+            if all_results:
+                context_parts.append("\n## RELEVANT POLICY EXCERPTS:")
+                for i, r in enumerate(all_results[:5], 1):
+                    context_parts.append(f"{i}. [{r.get('chunk_type', 'text')}] {r['text'][:300]}...")
         
         # Build prompt for final response
         context = "\n".join(context_parts)
@@ -731,6 +971,91 @@ JSON Response:"""
         
         state["response"] = response
         state["citations"] = self._extract_citations(state)
+        
+        return state
+    
+    async def _whole_doc_response_node(self, state: AgentState) -> AgentState:
+        """
+        WHOLE-DOC MODE: Process entire policy in one LLM call.
+        
+        For small policies (<30 pages / ~50k chars), we skip RAG entirely:
+        - No chunking → no missing context
+        - No retrieval latency
+        - Full document in Gemini's context window
+        
+        This eliminates the "Definitions Blind Spot" and cross-reference issues.
+        """
+        state["reasoning_trace"] = state.get("reasoning_trace", [])
+        state["reasoning_trace"].append("[WHOLE-DOC] Using full document mode (small policy)")
+        
+        full_text = state.get("full_policy_text", "")
+        user_message = state["user_message"]
+        intent = state.get("intent", "general_info")
+        items = state.get("items_to_check", [])
+        
+        # Truncate if somehow too long (shouldn't happen with proper threshold)
+        MAX_CHARS = 80000  # ~20k tokens, safe for Gemini
+        if len(full_text) > MAX_CHARS:
+            full_text = full_text[:MAX_CHARS]
+            state["reasoning_trace"].append(f"[WHOLE-DOC] Truncated to {MAX_CHARS} chars")
+        
+        # Build comprehensive prompt with full document
+        from app.services.llm_service import LLMMessage
+        
+        items_str = ", ".join(items) if items else "the user's question"
+        
+        system_prompt = """You are an expert insurance policy analyst. You have access to the COMPLETE policy document below.
+
+Your task is to answer the user's question accurately based on the policy.
+
+CRITICAL RULES:
+1. For EXCLUSION questions: List ALL explicit exclusions you find
+2. For COVERAGE questions: First check if excluded, then confirm if covered
+3. ALWAYS cite the relevant section/page when possible
+4. If you cannot find a definitive answer, say so clearly
+5. For financial questions (deductibles, limits), quote exact amounts
+
+RESPONSE FORMAT:
+- Start with a clear verdict (Covered ✅, Not Covered ❌, Conditional ⚠️, or Unknown ❓)
+- Provide reasoning with specific policy citations
+- Include relevant financial terms if applicable
+- End with any caveats or recommendations"""
+
+        user_prompt = f"""## COMPLETE POLICY DOCUMENT:
+
+{full_text}
+
+---
+
+## USER QUESTION:
+{user_message}
+
+## ITEMS TO ANALYZE:
+{items_str}
+
+## INTENT:
+{intent}
+
+Please analyze the policy and provide a comprehensive answer."""
+
+        try:
+            messages = [
+                LLMMessage(role="system", content=system_prompt),
+                LLMMessage(role="user", content=user_prompt),
+            ]
+            
+            response = await self.llm.generate(messages, temperature=0.1)
+            state["response"] = response.content
+            state["reasoning_trace"].append("[WHOLE-DOC] Generated response with full document context")
+            
+            # Since we used the full doc, citations come from the response itself
+            state["citations"] = ["Full policy document analyzed"]
+            state["coverage_checks"] = []  # Let the response speak for itself
+            
+        except Exception as e:
+            logger.error(f"Whole-doc response failed: {e}")
+            state["response"] = f"I encountered an error analyzing the policy: {str(e)}"
+            state["reasoning_trace"].append(f"[WHOLE-DOC] Error: {str(e)}")
         
         return state
     
@@ -762,6 +1087,32 @@ JSON Response:"""
         if all_excluded and state.get("coverage_checks"):
             return "excluded"
         return "not_excluded"
+    
+    def _route_by_policy_size(self, state: AgentState) -> str:
+        """
+        Route based on policy size - Whole-Doc vs RAG.
+        
+        Small policies (<30 pages) use whole-doc mode for better accuracy.
+        Large policies use the traditional RAG chunking approach.
+        """
+        if state.get("use_whole_doc_mode") and state.get("full_policy_text"):
+            return "whole_doc"
+        return "rag_retrieve"
+    
+    def _route_after_retrieve(self, state: AgentState) -> str:
+        """
+        Route after retrieval based on intent.
+        
+        - Coverage checks go through exclusion gate
+        - Other intents go directly to response (using retrieved context)
+        """
+        intent = state.get("intent", "general_info")
+        
+        if intent == QueryIntent.CHECK_COVERAGE.value:
+            return "check_exclusions"
+        else:
+            # Explain terms, get limits, general info - direct response with retrieved context
+            return "direct_response"
     
     # =========================================================================
     # Helper Methods
@@ -921,9 +1272,19 @@ JSON Response:"""
         policy_id: str,
         user_id: Optional[int] = None,
         agent_id: Optional[int] = None,
+        full_policy_text: Optional[str] = None,
+        use_whole_doc_mode: bool = False,
     ) -> dict:
         """
         Process a user query through the reasoning loop.
+        
+        Args:
+            user_message: The user's question
+            policy_id: Policy identifier for RAG filtering
+            user_id: Optional user ID (for B2B context)
+            agent_id: Optional agent ID
+            full_policy_text: Full policy text for whole-doc mode
+            use_whole_doc_mode: If True, skip RAG and use full document
         
         Returns:
             dict with response, decision, citations, and reasoning_trace
@@ -933,14 +1294,24 @@ JSON Response:"""
             "policy_id": policy_id,
             "user_id": user_id,
             "agent_id": agent_id,
+            # Whole-Doc Mode
+            "full_policy_text": full_policy_text,
+            "use_whole_doc_mode": use_whole_doc_mode and bool(full_policy_text),
+            # Classification
             "intent": "",
             "items_to_check": [],
+            # Retrieved context
+            "retrieved_chunks": [],
+            "definitions_context": "",
+            # Search Results
             "exclusion_results": [],
             "inclusion_results": [],
             "financial_results": [],
             "user_limitations": [],
+            # Decision
             "coverage_checks": [],
             "final_decision": "",
+            # Output
             "response": "",
             "citations": [],
             "reasoning_trace": [],
@@ -955,6 +1326,7 @@ JSON Response:"""
             "citations": final_state.get("citations", []),
             "reasoning_trace": final_state.get("reasoning_trace", []),
             "intent": final_state.get("intent", ""),
+            "used_whole_doc_mode": initial_state["use_whole_doc_mode"],
         }
 
 

@@ -16,6 +16,9 @@ import {
   Sparkles,
 } from "lucide-react";
 import clsx from "clsx";
+import { ThemeToggle } from "@/components/theme-toggle";
+import { AgentCardSkeleton } from "@/components/loading-skeleton";
+import { useTheme } from "@/lib/theme-context";
 
 // =============================================================================
 // Types
@@ -91,6 +94,7 @@ function AgentCard({
   const [isEditing, setIsEditing] = useState(false);
   const [editName, setEditName] = useState(agent.name);
   const inputRef = useRef<HTMLInputElement>(null);
+  const { theme } = useTheme();
 
   useEffect(() => {
     if (isEditing && inputRef.current) {
@@ -149,17 +153,22 @@ function AgentCard({
                   onChange={(e) => setEditName(e.target.value)}
                   onKeyDown={handleKeyDown}
                   onBlur={handleSave}
-                  className="flex-1 bg-surface-800 border border-surface-600 rounded-lg px-3 py-1.5 text-white text-lg font-semibold focus:outline-none focus:ring-2 focus:ring-brand-500/50"
+                  className={clsx(
+                    "flex-1 border rounded-lg px-3 py-1.5 text-lg font-semibold focus:outline-none focus:ring-2 focus:ring-brand-500/50",
+                    theme === "dark"
+                      ? "bg-surface-800 border-surface-600 text-white"
+                      : "bg-white border-slate-300 text-slate-900"
+                  )}
                 />
                 <button
                   onClick={handleSave}
-                  className="p-1.5 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 rounded-lg transition-colors"
+                  className="p-1.5 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-500 rounded-lg transition-colors"
                 >
                   <Check size={16} />
                 </button>
                 <button
                   onClick={handleCancel}
-                  className="p-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 rounded-lg transition-colors"
+                  className="p-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-500 rounded-lg transition-colors"
                 >
                   <X size={16} />
                 </button>
@@ -168,7 +177,7 @@ function AgentCard({
               <>
                 <button
                   onClick={onClick}
-                  className="font-semibold text-white text-lg truncate hover:text-brand-400 transition-colors text-left"
+                  className="font-semibold text-lg truncate hover:text-brand-500 transition-colors text-left"
                 >
                   {agent.name}
                 </button>
@@ -177,14 +186,20 @@ function AgentCard({
                     e.stopPropagation();
                     setIsEditing(true);
                   }}
-                  className="p-1.5 opacity-0 group-hover:opacity-100 hover:bg-surface-700 rounded-lg transition-all"
+                  className={clsx(
+                    "p-1.5 opacity-0 group-hover:opacity-100 rounded-lg transition-all",
+                    theme === "dark" ? "hover:bg-surface-700" : "hover:bg-slate-100"
+                  )}
                 >
-                  <Pencil size={14} className="text-surface-400" />
+                  <Pencil size={14} className={theme === "dark" ? "text-surface-400" : "text-slate-400"} />
                 </button>
               </>
             )}
           </div>
-          <p className="text-sm text-surface-400 truncate">
+          <p className={clsx(
+            "text-sm truncate",
+            theme === "dark" ? "text-surface-400" : "text-slate-500"
+          )}>
             {agent.provider_name || "Insurance Provider"} · {agent.policy_type || "Policy"}
           </p>
         </div>
@@ -192,28 +207,46 @@ function AgentCard({
 
       {/* Stats */}
       <div className="grid grid-cols-3 gap-3 mb-4">
-        <div className="bg-surface-800/50 rounded-lg p-3">
-          <div className="flex items-center gap-1.5 text-surface-500 text-xs mb-1">
+        <div className={clsx(
+          "rounded-lg p-3",
+          theme === "dark" ? "bg-surface-800/50" : "bg-slate-50"
+        )}>
+          <div className={clsx(
+            "flex items-center gap-1.5 text-xs mb-1",
+            theme === "dark" ? "text-surface-500" : "text-slate-500"
+          )}>
             <MessageSquare className="w-3.5 h-3.5" />
             Chats
           </div>
-          <p className="text-white font-semibold">{agent.total_conversations}</p>
+          <p className="font-semibold">{agent.total_conversations}</p>
         </div>
-        <div className="bg-surface-800/50 rounded-lg p-3">
-          <div className="flex items-center gap-1.5 text-surface-500 text-xs mb-1">
+        <div className={clsx(
+          "rounded-lg p-3",
+          theme === "dark" ? "bg-surface-800/50" : "bg-slate-50"
+        )}>
+          <div className={clsx(
+            "flex items-center gap-1.5 text-xs mb-1",
+            theme === "dark" ? "text-surface-500" : "text-slate-500"
+          )}>
             <Shield className="w-3.5 h-3.5" />
             Coverage
           </div>
-          <p className="text-white font-semibold">
+          <p className="font-semibold">
             {agent.coverage_summary?.total_inclusions || 0}
           </p>
         </div>
-        <div className="bg-surface-800/50 rounded-lg p-3">
-          <div className="flex items-center gap-1.5 text-surface-500 text-xs mb-1">
+        <div className={clsx(
+          "rounded-lg p-3",
+          theme === "dark" ? "bg-surface-800/50" : "bg-slate-50"
+        )}>
+          <div className={clsx(
+            "flex items-center gap-1.5 text-xs mb-1",
+            theme === "dark" ? "text-surface-500" : "text-slate-500"
+          )}>
             <Clock className="w-3.5 h-3.5" />
             Last Used
           </div>
-          <p className="text-white font-semibold text-xs">
+          <p className="font-semibold text-xs">
             {agent.last_used_at
               ? new Date(agent.last_used_at).toLocaleDateString()
               : "Never"}
@@ -223,18 +256,29 @@ function AgentCard({
 
       {/* Categories */}
       {agent.coverage_summary?.categories && agent.coverage_summary.categories.length > 0 && (
-        <div className="pt-4 border-t border-surface-800">
+        <div className={clsx(
+          "pt-4 border-t",
+          theme === "dark" ? "border-surface-800" : "border-slate-200"
+        )}>
           <div className="flex flex-wrap gap-2">
             {agent.coverage_summary.categories.slice(0, 3).map((cat, i) => (
               <span
                 key={i}
-                className="px-2 py-1 bg-surface-800 rounded text-xs text-surface-400"
+                className={clsx(
+                  "px-2 py-1 rounded text-xs",
+                  theme === "dark" 
+                    ? "bg-surface-800 text-surface-400" 
+                    : "bg-slate-100 text-slate-600"
+                )}
               >
                 {cat}
               </span>
             ))}
             {agent.coverage_summary.categories.length > 3 && (
-              <span className="px-2 py-1 text-xs text-surface-500">
+              <span className={clsx(
+                "px-2 py-1 text-xs",
+                theme === "dark" ? "text-surface-500" : "text-slate-400"
+              )}>
                 +{agent.coverage_summary.categories.length - 3} more
               </span>
             )}
@@ -255,18 +299,23 @@ function AgentCard({
 }
 
 function CreateAgentCard({ onClick }: { onClick: () => void }) {
+  const { theme } = useTheme();
+  
   return (
     <button
       onClick={onClick}
-      className="card p-6 border-dashed hover:border-brand-500/50 hover:bg-surface-800/30 transition-all duration-300 group h-full min-h-[280px] flex flex-col items-center justify-center"
+      className="card p-6 border-dashed hover:border-brand-500/50 transition-all duration-300 group h-full min-h-[280px] flex flex-col items-center justify-center"
     >
       <div className="w-20 h-20 rounded-2xl bg-brand-500/10 border border-brand-500/30 flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
-        <Plus className="w-10 h-10 text-brand-400" />
+        <Plus className="w-10 h-10 text-brand-500" />
       </div>
-      <h3 className="font-semibold text-white text-xl mb-2 group-hover:text-brand-400 transition-colors">
+      <h3 className="font-semibold text-xl mb-2 group-hover:text-brand-500 transition-colors">
         New Agent
       </h3>
-      <p className="text-sm text-surface-400 text-center max-w-xs">
+      <p className={clsx(
+        "text-sm text-center max-w-xs",
+        theme === "dark" ? "text-surface-400" : "text-slate-500"
+      )}>
         Upload a policy document to create a new insurance assistant
       </p>
     </button>
@@ -274,13 +323,18 @@ function CreateAgentCard({ onClick }: { onClick: () => void }) {
 }
 
 function EmptyState({ onCreateDemo, onCreate }: { onCreateDemo: () => void; onCreate: () => void }) {
+  const { theme } = useTheme();
+  
   return (
     <div className="card p-12 text-center">
       <div className="w-24 h-24 rounded-2xl bg-gradient-to-br from-brand-500/20 to-brand-600/20 flex items-center justify-center mx-auto mb-6">
-        <Bot className="w-12 h-12 text-brand-400" />
+        <Bot className="w-12 h-12 text-brand-500" />
       </div>
-      <h2 className="text-3xl font-bold text-white mb-3">Welcome to InsurAI</h2>
-      <p className="text-surface-400 max-w-md mx-auto mb-8 text-lg">
+      <h2 className="text-3xl font-bold mb-3">Welcome to InsurAI</h2>
+      <p className={clsx(
+        "max-w-md mx-auto mb-8 text-lg",
+        theme === "dark" ? "text-surface-400" : "text-slate-500"
+      )}>
         Create your first insurance agent by uploading a policy document.
         Each agent specializes in understanding one specific policy.
       </p>
@@ -304,6 +358,7 @@ function EmptyState({ onCreateDemo, onCreate }: { onCreateDemo: () => void; onCr
 
 export default function HomePage() {
   const router = useRouter();
+  const { theme } = useTheme();
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
@@ -363,15 +418,18 @@ export default function HomePage() {
   return (
     <div className="min-h-screen">
       {/* Header */}
-      <header className="border-b border-surface-800 bg-surface-950/80 backdrop-blur-sm sticky top-0 z-10">
+      <header className="header-bar">
         <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-brand-500 to-brand-600 flex items-center justify-center shadow-lg shadow-brand-500/20">
               <Shield size={22} className="text-white" />
             </div>
             <div>
-              <h1 className="font-semibold text-white text-lg">InsurAI</h1>
-              <p className="text-xs text-surface-400">Policy Intelligence</p>
+              <h1 className="font-semibold text-lg">InsurAI</h1>
+              <p className={clsx(
+                "text-xs",
+                theme === "dark" ? "text-surface-400" : "text-slate-500"
+              )}>Policy Intelligence</p>
             </div>
           </div>
 
@@ -399,6 +457,7 @@ export default function HomePage() {
                 </button>
               </>
             )}
+            <ThemeToggle />
           </div>
         </div>
       </header>
@@ -408,18 +467,20 @@ export default function HomePage() {
         {/* Error */}
         {error && (
           <div className="mb-6 bg-rose-500/10 border border-rose-500/30 rounded-xl p-4 flex items-start gap-3 animate-slide-up">
-            <AlertTriangle className="w-5 h-5 text-rose-400 mt-0.5" />
+            <AlertTriangle className="w-5 h-5 text-rose-500 mt-0.5" />
             <div>
-              <p className="font-medium text-rose-400">Error</p>
-              <p className="text-sm text-rose-300/80">{error}</p>
+              <p className="font-medium text-rose-500">Error</p>
+              <p className="text-sm text-rose-400">{error}</p>
             </div>
           </div>
         )}
 
-        {/* Loading State */}
+        {/* Loading State with Skeletons */}
         {loading && (
-          <div className="flex items-center justify-center py-20">
-            <Loader2 className="w-8 h-8 text-brand-400 animate-spin" />
+          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {[1, 2, 3].map((i) => (
+              <AgentCardSkeleton key={i} />
+            ))}
           </div>
         )}
 
@@ -435,8 +496,8 @@ export default function HomePage() {
         {!loading && agents.length > 0 && (
           <>
             <div className="mb-8">
-              <h2 className="text-2xl font-bold text-white mb-2">My Agents</h2>
-              <p className="text-surface-400">
+              <h2 className="text-2xl font-bold mb-2">My Agents</h2>
+              <p className={theme === "dark" ? "text-surface-400" : "text-slate-500"}>
                 Click an agent to start chatting, or click the pencil to rename
               </p>
             </div>

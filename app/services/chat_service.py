@@ -324,26 +324,44 @@ class ChatService:
             # Use Coverage Agent with reasoning loop (Phase B pipeline)
             try:
                 from app.services.coverage_agent import get_coverage_agent
+                from app.services.agent_service import get_agent_service
                 
                 coverage_agent = get_coverage_agent()
+                
+                # Check for Whole-Doc Mode (small policies)
+                full_policy_text = None
+                use_whole_doc_mode = False
+                
+                if session.agent_id:
+                    agent_service = get_agent_service()
+                    full_policy_text = agent_service.get_full_policy_text(session.agent_id)
+                    use_whole_doc_mode = agent_service.is_small_policy(session.agent_id)
+                    
+                    if use_whole_doc_mode:
+                        logger.info(f"Using Whole-Doc Mode for agent {session.agent_id}")
+                
                 result = await coverage_agent.process(
                     user_message=user_message,
                     policy_id=session.policy_id,
                     user_id=session.user_id,
                     agent_id=session.agent_id,
+                    full_policy_text=full_policy_text,
+                    use_whole_doc_mode=use_whole_doc_mode,
                 )
                 
                 response_content = result["response"]
                 
                 # Add reasoning trace as metadata for debugging
+                pipeline_name = "whole_doc_mode" if result.get("used_whole_doc_mode") else "coverage_agent_v1"
                 metadata = {
                     "reasoning_trace": result.get("reasoning_trace", []),
                     "coverage_checks": result.get("coverage_checks", []),
                     "citations": result.get("citations", []),
-                    "pipeline": "coverage_agent_v1",
+                    "pipeline": pipeline_name,
+                    "used_whole_doc_mode": result.get("used_whole_doc_mode", False),
                 }
                 
-                logger.info(f"Coverage Agent trace: {result.get('reasoning_trace', [])}")
+                logger.info(f"Coverage Agent trace ({pipeline_name}): {result.get('reasoning_trace', [])}")
                 
             except Exception as e:
                 logger.exception(f"Coverage Agent error, falling back to simple RAG: {e}")
