@@ -17,14 +17,101 @@ Key optimizations:
 """
 
 import asyncio
+import json
 import logging
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal, Optional, TypedDict
 
 from langgraph.graph import StateGraph, END
+from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Pydantic Models for Structured LLM Output (Risk Mitigation: Force Financial Fields)
+# =============================================================================
+
+class ItemCoverageAnalysis(BaseModel):
+    """
+    Pydantic model for individual item coverage analysis.
+    
+    Using Pydantic ensures the LLM response is strictly validated,
+    preventing "lazy" responses that miss financial fields.
+    """
+    item: str = Field(description="The name of the item being checked")
+    is_covered: bool = Field(description="Whether the item is explicitly covered")
+    confidence: float = Field(ge=0.0, le=1.0, description="Confidence score 0-1")
+    coverage_reason: str = Field(description="Brief explanation of coverage status")
+    deductible: Optional[str] = Field(
+        default=None,
+        description="Deductible amount if found (e.g., '400 NIS', '$500'). REQUIRED if item is covered."
+    )
+    coverage_limit: Optional[str] = Field(
+        default=None,
+        description="Coverage cap/limit if found (e.g., '10,000 NIS', 'Unlimited')"
+    )
+    relevant_excerpt: str = Field(
+        default="",
+        description="Key policy text supporting this conclusion"
+    )
+    
+    @field_validator('deductible', mode='before')
+    @classmethod
+    def validate_deductible(cls, v, info):
+        """Ensure deductible is captured when coverage is confirmed."""
+        # Convert None to "Not specified" to flag missing data
+        if v is None or v == "null" or v == "":
+            return None
+        return str(v)
+    
+    @field_validator('coverage_limit', mode='before')
+    @classmethod
+    def validate_coverage_limit(cls, v):
+        """Normalize coverage limit values."""
+        if v is None or v == "null" or v == "":
+            return None
+        return str(v)
+
+
+class CoverageAnalysisResponse(BaseModel):
+    """
+    Structured response from the merged reasoning node.
+    
+    Forces the LLM to provide complete financial information
+    for each item, reducing the risk of incomplete responses.
+    """
+    items: list[ItemCoverageAnalysis] = Field(
+        description="List of coverage analysis results for each item"
+    )
+    
+    @classmethod
+    def from_llm_response(cls, response_text: str) -> Optional["CoverageAnalysisResponse"]:
+        """
+        Parse LLM response and validate with Pydantic.
+        Falls back gracefully if parsing fails.
+        """
+        try:
+            # Extract JSON from response
+            json_match = re.search(r'\{[\s\S]*\}', response_text)
+            if not json_match:
+                logger.warning("No JSON found in LLM response")
+                return None
+            
+            json_str = json_match.group()
+            data = json.loads(json_str)
+            
+            # Validate with Pydantic
+            return cls.model_validate(data)
+            
+        except json.JSONDecodeError as e:
+            logger.warning(f"JSON parsing failed: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"Pydantic validation failed: {e}")
+            return None
 
 
 # =============================================================================
@@ -846,18 +933,13 @@ JSON Response:"""
             messages = [LLMMessage(role="user", content=prompt)]
             response = await self.llm.generate(messages, temperature=0.0)
             
-            import json
-            import re
+            # Use Pydantic model for strict validation (Risk Mitigation)
+            parsed_response = CoverageAnalysisResponse.from_llm_response(response.content)
             
-            # Extract JSON from response
-            json_match = re.search(r'\{[\s\S]*\}', response.content)
-            if json_match:
-                result = json.loads(json_match.group())
-                
-                for item_result in result.get("items", []):
-                    item_name = item_result.get("item", "")
-                    is_covered = item_result.get("is_covered", False)
-                    confidence = item_result.get("confidence", 0.0)
+            if parsed_response:
+                for item_result in parsed_response.items:
+                    item_name = item_result.item
+                    is_covered = item_result.is_covered
                     
                     # Update or create coverage check
                     existing_check = next(
@@ -865,35 +947,71 @@ JSON Response:"""
                         None
                     )
                     
+                    # Log warning if covered but missing financial info
+                    if is_covered and not item_result.deductible:
+                        logger.warning(
+                            f"[FINANCIAL_MISSING] Item '{item_name}' is covered but "
+                            f"deductible not extracted. May need manual review."
+                        )
+                        state["reasoning_trace"].append(
+                            f"[⚠️ FINANCIAL] {item_name} covered but deductible not found in policy"
+                        )
+                    
                     if existing_check:
                         existing_check["inclusion_found"] = is_covered
-                        existing_check["inclusion_text"] = item_result.get("relevant_excerpt", "")
+                        existing_check["inclusion_text"] = item_result.relevant_excerpt
                         if is_covered and not existing_check.get("exclusion_found"):
                             existing_check["decision"] = CoverageDecision.COVERED.value
-                            existing_check["reason"] = item_result.get("coverage_reason", "Covered")
-                        # Add financial info
-                        if item_result.get("deductible"):
-                            existing_check["deductible_info"] = item_result["deductible"]
-                        if item_result.get("coverage_limit"):
-                            existing_check["limit_info"] = item_result["coverage_limit"]
+                            existing_check["reason"] = item_result.coverage_reason
+                        # Add financial info (validated by Pydantic)
+                        existing_check["deductible_info"] = item_result.deductible
+                        existing_check["limit_info"] = item_result.coverage_limit
                     else:
                         state["coverage_checks"].append({
                             "item": item_name,
                             "decision": CoverageDecision.COVERED.value if is_covered else CoverageDecision.UNKNOWN.value,
-                            "reason": item_result.get("coverage_reason", "No explicit coverage found"),
+                            "reason": item_result.coverage_reason or "No explicit coverage found",
+                            "exclusion_found": False,
+                            "inclusion_found": is_covered,
+                            "inclusion_text": item_result.relevant_excerpt,
+                            "deductible_info": item_result.deductible,
+                            "limit_info": item_result.coverage_limit,
+                            "citations": [],
+                            "llm_reason": item_result.coverage_reason,
+                        })
+                    
+                    # Include financial info in trace
+                    financial_note = ""
+                    if item_result.deductible:
+                        financial_note += f" | Deductible: {item_result.deductible}"
+                    if item_result.coverage_limit:
+                        financial_note += f" | Limit: {item_result.coverage_limit}"
+                    
+                    state["reasoning_trace"].append(
+                        f"[REASONING] {'✅' if is_covered else '❓'} {item_name}: "
+                        f"{item_result.coverage_reason[:50]}...{financial_note}"
+                    )
+            else:
+                # Fallback: Try raw JSON parsing if Pydantic fails
+                logger.warning("Pydantic validation failed, attempting raw JSON fallback")
+                state["reasoning_trace"].append("[REASONING] ⚠️ Using fallback JSON parsing")
+                json_match = re.search(r'\{[\s\S]*\}', response.content)
+                if json_match:
+                    result = json.loads(json_match.group())
+                    for item_result in result.get("items", []):
+                        item_name = item_result.get("item", "")
+                        is_covered = item_result.get("is_covered", False)
+                        state["coverage_checks"].append({
+                            "item": item_name,
+                            "decision": CoverageDecision.COVERED.value if is_covered else CoverageDecision.UNKNOWN.value,
+                            "reason": item_result.get("coverage_reason", "Fallback parsing"),
                             "exclusion_found": False,
                             "inclusion_found": is_covered,
                             "inclusion_text": item_result.get("relevant_excerpt", ""),
                             "deductible_info": item_result.get("deductible"),
                             "limit_info": item_result.get("coverage_limit"),
                             "citations": [],
-                            "llm_reason": item_result.get("coverage_reason", ""),
                         })
-                    
-                    state["reasoning_trace"].append(
-                        f"[REASONING] {'✅' if is_covered else '❓'} {item_name}: "
-                        f"{item_result.get('coverage_reason', 'No info')[:50]}..."
-                    )
                     
         except Exception as e:
             logger.warning(f"Merged reasoning failed: {e}")

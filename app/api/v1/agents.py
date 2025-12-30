@@ -5,6 +5,7 @@ Provides:
 - Agent creation from policy upload
 - Agent listing and management
 - User limitations for B2B
+- Ingestion status tracking (for large documents)
 """
 
 import logging
@@ -19,6 +20,11 @@ from app.services.agent_service import (
     AgentInfo,
     UserLimitationInfo,
     get_agent_service,
+)
+from app.services.ingestion_status import (
+    IngestionStatusService,
+    IngestionProgress,
+    get_ingestion_status_service,
 )
 
 logger = logging.getLogger(__name__)
@@ -312,6 +318,94 @@ async def delete_agent(
         raise HTTPException(status_code=404, detail="Agent not found")
     
     return {"success": True, "message": "Agent archived successfully"}
+
+
+# =============================================================================
+# Ingestion Status Endpoints (Progress Tracking)
+# =============================================================================
+
+class IngestionStatusResponse(BaseModel):
+    """Response for ingestion status."""
+    job_id: str
+    policy_id: str
+    stage: str
+    progress_percent: float
+    current_step: str
+    total_chunks: int
+    processed_chunks: int
+    started_at: str
+    estimated_seconds_remaining: Optional[int]
+    error_message: Optional[str]
+
+
+@router.get("/ingestion/status/{job_id}", response_model=IngestionStatusResponse)
+async def get_ingestion_status(
+    job_id: str,
+    status_service: IngestionStatusService = Depends(get_ingestion_status_service),
+):
+    """
+    Get the current status of a policy ingestion job.
+    
+    Use this endpoint to poll for progress during long-running uploads.
+    The frontend should poll every 2-3 seconds.
+    
+    Stages:
+    - pending: Job created, waiting to start
+    - reading_pdf: Reading PDF file
+    - extracting_text: OCR/text extraction
+    - chunking: Splitting text into chunks
+    - classifying: LLM classification (slowest stage)
+    - embedding: Generating vector embeddings
+    - storing: Saving to vector store
+    - completed: Done!
+    - failed: Error occurred
+    """
+    progress = status_service.get_progress(job_id)
+    
+    if not progress:
+        raise HTTPException(status_code=404, detail="Ingestion job not found")
+    
+    return IngestionStatusResponse(
+        job_id=progress.job_id,
+        policy_id=progress.policy_id,
+        stage=progress.stage.value,
+        progress_percent=progress.progress_percent,
+        current_step=progress.current_step,
+        total_chunks=progress.total_chunks,
+        processed_chunks=progress.processed_chunks,
+        started_at=progress.started_at.isoformat(),
+        estimated_seconds_remaining=progress.estimated_seconds_remaining,
+        error_message=progress.error_message,
+    )
+
+
+@router.get("/ingestion/status/policy/{policy_id}", response_model=IngestionStatusResponse)
+async def get_ingestion_status_by_policy(
+    policy_id: str,
+    status_service: IngestionStatusService = Depends(get_ingestion_status_service),
+):
+    """
+    Get ingestion status by policy ID.
+    
+    Returns the most recent ingestion job for the given policy.
+    """
+    progress = status_service.get_job_by_policy(policy_id)
+    
+    if not progress:
+        raise HTTPException(status_code=404, detail="No ingestion job found for this policy")
+    
+    return IngestionStatusResponse(
+        job_id=progress.job_id,
+        policy_id=progress.policy_id,
+        stage=progress.stage.value,
+        progress_percent=progress.progress_percent,
+        current_step=progress.current_step,
+        total_chunks=progress.total_chunks,
+        processed_chunks=progress.processed_chunks,
+        started_at=progress.started_at.isoformat(),
+        estimated_seconds_remaining=progress.estimated_seconds_remaining,
+        error_message=progress.error_message,
+    )
 
 
 # =============================================================================

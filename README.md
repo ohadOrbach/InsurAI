@@ -121,19 +121,21 @@ nano .env
 
 Required environment variables:
 ```env
-# LLM
-GOOGLE_API_KEY=your_gemini_api_key
+# LLM Provider - Google Gemini recommended (get key from https://aistudio.google.com/apikey)
 LLM_PROVIDER=google
+GOOGLE_API_KEY=your_google_api_key_here
 LLM_MODEL=gemini-2.0-flash
 
-# Database
-DATABASE_URL=postgresql://user:password@localhost:5432/insur
+# Database - PostgreSQL with pgvector extension
+DATABASE_URL=postgresql://your_user:your_password@localhost:5432/insur
 VECTOR_STORE_TYPE=pgvector
 
-# Embeddings (uses same Google API key)
+# Embeddings - Uses same Google API key
 EMBEDDING_PROVIDER=gemini
 EMBEDDING_MODEL=models/text-embedding-004
 ```
+
+> ⚠️ **Security Note:** Never commit your `.env` file to git. The `.env.example` file contains safe placeholder values.
 
 ### 3. Setup Database
 
